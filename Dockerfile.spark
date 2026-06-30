@@ -1,0 +1,27 @@
+# Optimized PySpark + Delta Lake Docker container
+FROM python:3.10-slim
+
+# 1. Install Java (OpenJDK JRE is required to run Spark JVM)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends default-jre-headless && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 2. Install PySpark and Delta-Spark libraries
+RUN pip install --no-cache-dir pyspark==3.5.0 delta-spark==3.0.0
+
+WORKDIR /opt/spark
+
+# 3. Optimization: Pre-fetch and cache Kafka and Delta dependency jars in the image layer
+# This avoids downloading ~50MB of JAR packages from Maven Central on every container startup.
+RUN python -c " \
+from pyspark.sql import SparkSession; \
+SparkSession.builder \
+  .config('spark.jars.packages', 'org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.0.0') \
+  .getOrCreate() \
+"
+
+# Copy the streaming processor script
+COPY src/spark_processor.py ./spark_processor.py
+
+CMD ["python", "spark_processor.py"]

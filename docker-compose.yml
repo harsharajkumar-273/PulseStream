@@ -126,3 +126,18 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     depends_on:
       - prometheus
+
+  # 8. Data Engineering Layer: Apache Spark & Delta Lake
+  spark-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: pulsestream-spark
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    volumes:
+      - ./data/aggregated_metrics:/opt/spark/data/aggregated_metrics
+      - ./data/checkpoint:/opt/spark/data/aggregated_metrics_checkpoint
+    depends_on:
+      redpanda:
+        condition: service_healthy
