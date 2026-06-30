@@ -32,6 +32,16 @@ export const authenticate = async (
 
     const cacheKey = `client:key:${apiKey}`;
 
+    // TODO: [Exercise - Redis Outage Circuit Breaker]
+    // Currently, if Redis goes down, `redis.get` will throw an error, causing this
+    // middleware to throw an HTTP 500 error and shut down all ingestion.
+    // Task: Wrap the Redis cache get/set logic in a try-catch block. If Redis fails,
+    // catch the error, log a warning (e.g. '⚠️ Redis offline, falling back to DB'), 
+    // and query the PostgreSQL database directly so the gateway continues running.
+    // Tip: Use a short-lived local memory cache (like a simple Map or LRU cache)
+    // to store valid keys locally for 30 seconds during a Redis outage, protecting
+    // your PostgreSQL pool from getting flooded.
+
     // 1. Try to fetch client from Redis Cache
     const cachedClient = await redis.get(cacheKey);
 
