@@ -22,3 +22,6 @@ Thumbs.db
 # Telemetry and local logs
 *.log
 .system_generated/
+
+# Local databases and analytics data mounts
+data/
