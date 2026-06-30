@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import eventRouter from './routes/event.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { metricsMiddleware, metricsRegistry } from './middleware/metrics.js';
@@ -11,6 +12,9 @@ app.use(cors());
 
 // Register Prometheus metrics collector middleware
 app.use(metricsMiddleware);
+
+// Serve static frontend dashboard
+app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Defense 1: Strict payload size limit of 10KB to prevent event loop starvation
 app.use(express.json({ limit: '10kb' }));
