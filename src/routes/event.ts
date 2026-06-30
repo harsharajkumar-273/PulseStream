@@ -3,6 +3,7 @@ import { validate } from '../middleware/validate.js';
 import { CreateEventSchema } from '../schemas/event.js';
 import { authenticate } from '../middleware/auth.js';
 import { enforceIdempotency } from '../middleware/idempotency.js';
+import { rateLimiter } from '../middleware/rateLimiter.js';
 import redis from '../config/redis.js';
 import { producer } from '../config/kafka.js';
 
@@ -13,6 +14,7 @@ const KAFKA_TOPIC = 'metrics.raw';
 router.post(
   '/events',
   authenticate,
+  rateLimiter,
   enforceIdempotency,
   validate(CreateEventSchema),
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
