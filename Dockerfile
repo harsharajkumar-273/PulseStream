@@ -33,6 +33,9 @@ RUN npm ci --only=production
 # Copy compiled files from build stage
 COPY --from=builder /usr/src/app/dist ./dist
 
+# Copy public static files for the dashboard
+COPY public ./public
+
 # Run as non-privileged node user for security
 USER node
 
