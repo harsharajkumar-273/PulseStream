@@ -12,6 +12,14 @@ export const kafka = new Kafka({
   },
 });
 
+// TODO: [Exercise - Kafka Partitioner Configuration]
+// When starting the API Gateway, KafkaJS prints a startup warning:
+// "KafkaJS v2.0.0 switched default partitioner. To retain the same partitioning behavior..."
+// Task: Pass the configuration object inside `kafka.producer(...)` to specify the partitioner:
+// 1. Resolve the warning by explicitly selecting the partitioner (e.g. Partitioners.LegacyPartitioner or a custom partitioner).
+// 2. Test and verify that events for the same `deviceId` consistently route to the exact same partition topic.
+// Tip: import { Partitioners } from 'kafkajs'; and configure it in the producer options:
+// export const producer: Producer = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
 export const producer: Producer = kafka.producer();
 
 export const connectKafka = async (): Promise<void> => {
