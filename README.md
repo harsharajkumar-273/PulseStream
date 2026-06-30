@@ -17,7 +17,7 @@ flowchart TD
     Client[IoT Client] -->|POST /v1/events| Gateway[API Ingestion Gateway]
     Client -->|WebSockets /v1/stream| Gateway
     
-    subgraph API Ingestion Gateway [API Gateway Service]
+    subgraph GatewayService ["API Ingestion Gateway (Express)"]
         Auth[Auth Middleware] --> Idemp[Idempotency Middleware]
         Idemp --> Parse[Zod Validation]
         Parse --> KafkaProd[Kafka Producer]
@@ -25,7 +25,7 @@ flowchart TD
     
     KafkaProd -->|Topic: metrics.raw| Redpanda[Redpanda Broker]
     
-    subgraph Consumer Service [Metrics Consumer Service]
+    subgraph ConsumerService ["Metrics Consumer (Worker)"]
         KafkaCons[Kafka Consumer] --> DBWrite[PostgreSQL Writer]
         KafkaCons -->|Failures| DLQProd[DLQ Producer]
     end
@@ -35,11 +35,13 @@ flowchart TD
     
     DBWrite -->|Atomic ON CONFLICT| Postgres[(PostgreSQL)]
     
-    subgraph Observability
-        Prom[Prometheus] -->|Scrapes Metrics| Gateway
-        Prom -->|Scrapes Metrics| Consumer Service
+    subgraph ObservabilityStack ["Observability Stack"]
+        Prom[Prometheus]
         Grafana[Grafana] -->|Visualizes| Prom
     end
+
+    Prom -->|Scrapes Metrics| Gateway
+    Prom -->|Scrapes Metrics| KafkaCons
     
     Gateway -->|Publish Event| Redis[(Redis Pub/Sub)]
     Redis -->|Subscribe & Broadcast| Gateway
