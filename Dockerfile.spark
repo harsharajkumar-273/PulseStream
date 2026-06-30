@@ -14,12 +14,7 @@ WORKDIR /opt/spark
 
 # 3. Optimization: Pre-fetch and cache Kafka and Delta dependency jars in the image layer
 # This avoids downloading ~50MB of JAR packages from Maven Central on every container startup.
-RUN python -c " \
-from pyspark.sql import SparkSession; \
-SparkSession.builder \
-  .config('spark.jars.packages', 'org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.0.0') \
-  .getOrCreate() \
-"
+RUN python -c "from pyspark.sql import SparkSession; SparkSession.builder.config('spark.jars.packages', 'org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.0.0').getOrCreate()"
 
 # Copy the streaming processor script
 COPY src/spark_processor.py ./spark_processor.py
