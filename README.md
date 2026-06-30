@@ -1,8 +1,12 @@
 # PulseStream: High-Throughput Real-Time Metrics Ingestion Pipeline
 
-PulseStream is a containerized, horizontally scalable telemetry and activity metrics ingestion pipeline. It is built using **Node.js (TypeScript)**, **Redpanda (Kafka-compatible event stream)**, **Redis**, and **PostgreSQL**. 
+PulseStream is a containerized, horizontally scalable telemetry and activity metrics ingestion pipeline. It is built using **Node.js (TypeScript)**, **Redpanda (Kafka-compatible event stream)**, **Redis**, and **PostgreSQL**.
 
-This repository serves as a hands-on implementation of core backend foundations, distributed systems design patterns, observability, and infrastructure orchestration.
+---
+
+### 📖 Project Documentation
+*   **Detailed Blueprint:** [System Design & Architecture Deep Dive](SYSTEM_DESIGN.md)
+*   **Open-Source License:** [MIT License](LICENSE)
 
 ---
 
