@@ -19,7 +19,8 @@ redis.on('error', (err: unknown) => {
 });
 
 // Create a duplicate connection specifically for blocking subscriptions
-export const subRedis = redis.duplicate();
+// We disable enableReadyCheck because subscriber connections cannot execute standard commands like INFO
+export const subRedis = redis.duplicate({ enableReadyCheck: false });
 
 subRedis.on('connect', () => {
   console.log('🔌 Connected to Redis (Subscription Client) successfully');
