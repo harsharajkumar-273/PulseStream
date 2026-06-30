@@ -1,0 +1,128 @@
+version: '3.8'
+
+services:
+  # 1. Database Layer: PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: pulsestream-postgres
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pulsestream
+    volumes:
+      # Auto-mount schema.sql so PostgreSQL runs migrations on first boot
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Caching & Locking Layer: Redis
+  redis:
+    image: redis:7-alpine
+    container_name: pulsestream-redis
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 3. Message Broker Layer: Redpanda (Kafka-compatible)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+    container_name: pulsestream-redpanda
+    command: >
+      redpanda start
+      --mode dev-container
+      --smp 1
+      --memory 1G
+      --line-stderr
+      --overprovisioned
+      --node-id 0
+      --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - '8081:8081' # Schema Registry
+      - '8082:8082' # HTTP Proxy
+      - '9092:9092' # External Kafka Client port
+      - '9644:9644' # Admin API
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 4. Ingestion Web Gateway (Stateful WS + HTTP Ingestion)
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulsestream-gateway
+    command: node dist/index.js
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: 3000
+      NODE_ENV: development
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pulsestream
+      KAFKA_BROKERS: redpanda:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  # 5. Database batch worker consumer
+  metrics-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulsestream-consumer
+    command: node dist/consumer.js
+    ports:
+      - '3001:3001'
+    environment:
+      CONSUMER_PORT: 3001
+      NODE_ENV: development
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pulsestream
+      KAFKA_BROKERS: redpanda:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  # 6. Observability: Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pulsestream-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - '9090:9090'
+    depends_on:
+      - api-gateway
+      - metrics-consumer
+
+  # 7. Visualization: Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pulsestream-grafana
+    ports:
+      - '3002:3000' # Expose Grafana on host port 3002
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
