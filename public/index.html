@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PulseStream Real-Time Ingestion Monitor</title>
+  <!-- Modern Google Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <style>
+    /* 1. Global Reset & Theme Variables */
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: rgba(17, 25, 40, 0.65);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --color-cyan: #06b6d4;
+      --color-violet: #8b5cf6;
+      --color-green: #10b981;
+      --color-red: #ef4444;
+      --color-yellow: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      /* Glowing backdrops */
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.08) 0%, transparent 40%);
+    }
+
+    /* 2. Layout Structure */
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(11, 15, 25, 0.8);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-pulse {
+      width: 14px;
+      height: 14px;
+      background-color: var(--color-cyan);
+      border-radius: 50%;
+      box-shadow: 0 0 12px var(--color-cyan);
+      position: relative;
+    }
+
+    .logo-pulse::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background-color: var(--color-cyan);
+      animation: pulse 1.8s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 1; }
+      100% { transform: scale(3.5); opacity: 0; }
+    }
+
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      background: linear-gradient(135deg, #fff 0%, var(--text-muted) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.4rem 0.8rem;
+      border-radius: 9999px;
+      border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--color-red);
+    }
+
+    .badge-dot.connected {
+      background-color: var(--color-green);
+      box-shadow: 0 0 8px var(--color-green);
+    }
+
+    main {
+      flex: 1;
+      max-width: 1300px;
+      width: 100%;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    /* 3. Cards & Grid System */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .glass-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .glass-card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .card-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+
+    .card-value {
+      font-size: 2.2rem;
+      font-weight: 800;
+      margin-top: 0.5rem;
+      display: flex;
+      align-items: baseline;
+      gap: 0.35rem;
+    }
+
+    .card-unit {
+      font-size: 1rem;
+      font-weight: 400;
+      color: var(--text-muted);
+    }
+
+    /* Grid Layout for Panels */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 1.25rem;
+    }
+
+    @media (max-width: 900px) {
+      .dashboard-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Ingestion Form Styling */
+    .injector-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    input, select {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--color-cyan);
+    }
+
+    button {
+      background: linear-gradient(135deg, var(--color-cyan) 0%, var(--color-violet) 100%);
+      border: none;
+      border-radius: 8px;
+      color: white;
+      padding: 0.85rem;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(139, 92, 246, 0.2);
+      transition: transform 0.15s, opacity 0.15s;
+    }
+
+    button:hover {
+      opacity: 0.95;
+      transform: scale(1.01);
+    }
+
+    button:active {
+      transform: scale(0.99);
+    }
+
+    /* Feed Console Log Container */
+    .console-feed {
+      height: 300px;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1rem;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.85rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .console-line {
+      display: flex;
+      gap: 0.75rem;
+      line-height: 1.4;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .line-time {
+      color: var(--color-cyan);
+      flex-shrink: 0;
+    }
+
+    .line-device {
+      color: var(--color-yellow);
+      flex-shrink: 0;
+    }
+
+    .line-msg {
+      word-break: break-all;
+    }
+
+    /* Status Notifications */
+    .notify {
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: none;
+      animation: fadeIn 0.25s;
+    }
+    .notify.success { background: rgba(16, 185, 129, 0.15); border: 1px solid var(--color-green); color: var(--color-green); }
+    .notify.error { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--color-red); color: var(--color-red); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-pulse"></div>
+      <h1>PulseStream Live Monitor</h1>
+    </div>
+    <div class="status-badge">
+      <div class="badge-dot" id="ws-dot"></div>
+      <span id="ws-status">DISCONNECTED</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Top Row Statistics -->
+    <div class="metrics-grid">
+      <div class="glass-card">
+        <div class="card-label">Events Ingested</div>
+        <div class="card-value" id="stat-count">0</div>
+      </div>
+      <div class="glass-card">
+        <div class="card-label">Avg Temperature</div>
+        <div class="card-value" id="stat-temp">-- <span class="card-unit">°C</span></div>
+      </div>
+      <div class="glass-card">
+        <div class="card-label">Avg CPU Load</div>
+        <div class="card-value" id="stat-cpu">-- <span class="card-unit">%</span></div>
+      </div>
+    </div>
+
+    <!-- Chart & Controls Row -->
+    <div class="dashboard-grid">
+      <!-- Line Chart -->
+      <div class="glass-card" style="min-height: 400px; display: flex; flex-direction: column;">
+        <div class="card-label" style="margin-bottom: 1rem;">Real-Time Metrics Ingestion Stream</div>
+        <div style="flex: 1; position: relative;">
+          <canvas id="liveChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Event Manual Injector -->
+      <div class="glass-card">
+        <div class="card-label" style="margin-bottom: 1.25rem;">Interactive Event Injector</div>
+        <form class="injector-form" id="injector-form" onsubmit="handleFormSubmit(event)">
+          <div class="form-group">
+            <label for="dev-id">Device ID (UUID)</label>
+            <select id="dev-id">
+              <option value="c3f00573-0f9c-4ebc-be79-ffca90123abc">Device Alpha (...abc)</option>
+              <option value="77a793fa-d630-4e3a-9644-88fa90123xyz">Device Beta (...xyz)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="event-type">Metric Type</label>
+            <select id="event-type">
+              <option value="temperature">Temperature (°C)</option>
+              <option value="cpu_usage">CPU Load (%)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="metric-val">Value</label>
+            <input type="number" id="metric-val" step="0.1" value="25.0" required>
+          </div>
+          <button type="submit">Publish Event</button>
+          
+          <div class="notify" id="notify-box"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Activity Log Console -->
+    <div class="glass-card">
+      <div class="card-label" style="margin-bottom: 1rem;">Live Log Ingestion Feed (WebSockets)</div>
+      <div class="console-feed" id="console-feed">
+        <div class="console-line">
+          <span class="line-time">[SYSTEM]</span>
+          <span class="line-msg">Waiting for WebSocket connections...</span>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const VALID_API_KEY = 'ps_live_test_key_abc123xyz';
+
+    // Global aggregates cache
+    let eventCount = 0;
+    let tempSum = 0;
+    let tempCount = 0;
+    let cpuSum = 0;
+    let cpuCount = 0;
+
+    // 1. Initialize Chart.js configuration
+    const ctx = document.getElementById('liveChart').getContext('2d');
+    
+    // Create subtle gradient fills
+    const cyanGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    cyanGrad.addColorStop(0, 'rgba(6, 182, 212, 0.25)');
+    cyanGrad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
+
+    const violetGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    violetGrad.addColorStop(0, 'rgba(139, 92, 246, 0.25)');
+    violetGrad.addColorStop(1, 'rgba(139, 92, 246, 0.0)');
+
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [], // Timeline stamps
+        datasets: [
+          {
+            label: 'Temperature (°C)',
+            data: [],
+            borderColor: '#06b6d4',
+            backgroundColor: cyanGrad,
+            borderWidth: 2,
+            tension: 0.4,
+            fill: true,
+            yAxisID: 'y-temp',
+          },
+          {
+            label: 'CPU Load (%)',
+            data: [],
+            borderColor: '#8b5cf6',
+            backgroundColor: violetGrad,
+            borderWidth: 2,
+            tension: 0.4,
+            fill: true,
+            yAxisID: 'y-cpu',
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: {
+            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+            ticks: { color: '#9ca3af' }
+          },
+          'y-temp': {
+            type: 'linear',
+            position: 'left',
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            ticks: { color: '#06b6d4' },
+            min: 10,
+            max: 75,
+            title: { display: true, text: 'Temperature (°C)', color: '#06b6d4' }
+          },
+          'y-cpu': {
+            type: 'linear',
+            position: 'right',
+            grid: { drawOnChartArea: false }, // Avoid duplicate gridlines
+            ticks: { color: '#8b5cf6' },
+            min: 0,
+            max: 100,
+            title: { display: true, text: 'CPU Load (%)', color: '#8b5cf6' }
+          }
+        },
+        plugins: {
+          legend: {
+            labels: { color: '#f3f4f6', font: { family: 'Inter', weight: '600' } }
+          }
+        }
+      }
+    });
+
+    // Limit chart data size to keep it clean
+    const maxDataPoints = 25;
+
+    // 2. WebSocket Connection Lifecycle
+    const connectWebSocket = () => {
+      const wsStatus = document.getElementById('ws-status');
+      const wsDot = document.getElementById('ws-dot');
+      const consoleFeed = document.getElementById('console-feed');
+      
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/v1/stream`;
+      
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        wsStatus.innerText = 'LIVE CONNECTED';
+        wsDot.classList.add('connected');
+        logConsole('SYSTEM', 'WebSocket connection established. Receiving events.');
+      };
+
+      ws.onclose = () => {
+        wsStatus.innerText = 'DISCONNECTED';
+        wsDot.classList.remove('connected');
+        logConsole('SYSTEM', 'WebSocket disconnected. Retrying in 5 seconds...');
+        setTimeout(connectWebSocket, 5000);
+      };
+
+      ws.onmessage = (messageFrame) => {
+        try {
+          const event = JSON.parse(messageFrame.data);
+          
+          // Log inside scroll feed
+          logConsole(event.deviceId.slice(0, 8), `Type: ${event.eventType} | Value: ${event.value.toFixed(1)}`);
+          
+          // Update Statistics Card values
+          eventCount++;
+          document.getElementById('stat-count').innerText = eventCount.toString();
+          
+          if (event.eventType === 'temperature') {
+            tempSum += event.value;
+            tempCount++;
+            document.getElementById('stat-temp').innerHTML = `${(tempSum / tempCount).toFixed(1)} <span class="card-unit">°C</span>`;
+          } else if (event.eventType === 'cpu_usage') {
+            cpuSum += event.value;
+            cpuCount++;
+            document.getElementById('stat-cpu').innerHTML = `${(cpuSum / cpuCount).toFixed(1)} <span class="card-unit">%</span>`;
+          }
+
+          // Append to Chart dataset
+          const timestampLabel = new Date(event.timestamp).toLocaleTimeString();
+          
+          // Add label if not exists
+          if (chart.data.labels.length === 0 || chart.data.labels[chart.data.labels.length - 1] !== timestampLabel) {
+            chart.data.labels.push(timestampLabel);
+            if (chart.data.labels.length > maxDataPoints) chart.data.labels.shift();
+          }
+
+          const datasetIndex = event.eventType === 'temperature' ? 0 : 1;
+          const otherDatasetIndex = event.eventType === 'temperature' ? 1 : 0;
+          
+          // Push event value
+          chart.data.datasets[datasetIndex].data.push({ x: timestampLabel, y: event.value });
+          if (chart.data.datasets[datasetIndex].data.length > maxDataPoints) {
+            chart.data.datasets[datasetIndex].data.shift();
+          }
+
+          // Maintain structure alignment for other dataset
+          if (chart.data.datasets[otherDatasetIndex].data.length < chart.data.labels.length) {
+            // Push last known value or null to keep chart aligned
+            const lastVal = chart.data.datasets[otherDatasetIndex].data.slice(-1)[0];
+            chart.data.datasets[otherDatasetIndex].data.push(lastVal || null);
+            if (chart.data.datasets[otherDatasetIndex].data.length > maxDataPoints) {
+              chart.data.datasets[otherDatasetIndex].data.shift();
+            }
+          }
+
+          chart.update('none'); // Update without full recalculation transition for speed
+        } catch (err) {
+          console.error('Error parsing WebSocket frame:', err);
+        }
+      };
+    };
+
+    // Helper to log rows in scroll view
+    const logConsole = (device, msg) => {
+      const feed = document.getElementById('console-feed');
+      const timeStr = new Date().toLocaleTimeString();
+      
+      const row = document.createElement('div');
+      row.className = 'console-line';
+      row.innerHTML = `
+        <span class="line-time">[${timeStr}]</span>
+        <span class="line-device">${device}</span>
+        <span class="line-msg">> ${msg}</span>
+      `;
+      feed.appendChild(row);
+      feed.scrollTop = feed.scrollHeight;
+    };
+
+    // 3. Form Event Injection Handler (REST API Ingestion)
+    const handleFormSubmit = async (event) => {
+      event.preventDefault();
+      
+      const notifyBox = document.getElementById('notify-box');
+      notifyBox.style.display = 'none';
+      
+      const deviceId = document.getElementById('dev-id').value;
+      const eventType = document.getElementById('event-type').value;
+      const value = parseFloat(document.getElementById('metric-val').value);
+      
+      // Auto-generate UUID v4 for the Idempotency Key
+      // Since browsers support crypto.randomUUID natively, we use it!
+      const idempotencyKey = crypto.randomUUID();
+      const payload = {
+        deviceId,
+        eventType,
+        value,
+        timestamp: Date.now()
+      };
+
+      try {
+        const res = await fetch('/v1/events', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': VALID_API_KEY,
+            'Idempotency-Key': idempotencyKey
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const status = res.status;
+        const resBody = await res.json().catch(() => ({}));
+
+        if (status === 202) {
+          notifyBox.className = 'notify success';
+          notifyBox.innerText = `Success (202 Accepted): Event queued. Idempotency Lock registered.`;
+        } else {
+          notifyBox.className = 'notify error';
+          notifyBox.innerText = `Error (${status}): ${resBody.message || 'Submission failed'}`;
+        }
+        notifyBox.style.display = 'block';
+      } catch (err) {
+        notifyBox.className = 'notify error';
+        notifyBox.innerText = `Network Error: ${err.message}`;
+        notifyBox.style.display = 'block';
+      }
+    };
+
+    // Connect WebSocket and initialize Page
+    connectWebSocket();
+  </script>
+</body>
+</html>
