@@ -54,6 +54,16 @@ const startConsumer = async () => {
           // Begin Database Transaction for the batch
           await pgClient.query('BEGIN');
 
+          // TODO: [Exercise - PG Transaction Abort Bug]
+          // If a single message fails database insertion inside this loop (e.g. database schema conflict),
+          // PostgreSQL immediately flags this transaction as ABORTED. Any subsequent inserts in the loop
+          // will fail with "current transaction is aborted, commands ignored until end of transaction block",
+          // and the final COMMIT will fail and rollback all events, causing Kafka to re-consume the batch in an infinite loop!
+          // Task: Resolve this by either:
+          // A) Accumulating values and executing a single bulk INSERT query for the entire batch.
+          // B) Utilizing sub-transactions (SQL SAVEPOINTs) for each message insertion.
+          // C) Skipping transaction blocks if message independence is preferred, or handling failures in a safe batch query.
+
           for (const message of batch.messages) {
             // Respect consumer cancellation tokens
             if (!isRunning() || isStale()) break;
