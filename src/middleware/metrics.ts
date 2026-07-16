@@ -35,6 +35,17 @@ export const metricsMiddleware = (req: Request, res: Response, next: NextFunctio
     return;
   }
 
+  // TODO: [Exercise - Prometheus activeRequestsGauge Leak]
+  // Currently, `activeRequestsGauge` is incremented when a request starts,
+  // and decremented when the response emits the 'finish' event.
+  // Bug: If a client prematurely closes the HTTP connection (aborts the request),
+  // Node.js will never emit the 'finish' event. Instead, it only emits the 'close' event.
+  // This causes the gauge value to drift upward forever, causing telemetry memory leakage!
+  // Task: Implement a unified callback that listens to both 'finish' and 'close' events
+  // to ensure that `activeRequestsGauge.dec()` is called exactly once per connection.
+  // Tip: Check if the response was already finished (using res.writableEnded) or use a
+  // execution flag variable to prevent double-decrementing.
+
   activeRequestsGauge.inc();
   const startTime = process.hrtime();
 
