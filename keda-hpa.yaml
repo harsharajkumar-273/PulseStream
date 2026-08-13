@@ -1,0 +1,20 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: pulsestream-consumer-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: pulsestream-consumer-deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 30
+  pollingInterval: 15
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: redpanda:9092
+        consumerGroup: pulsestream-metrics-group
+        topic: telemetry-stream
+        lagThreshold: "100"
+        offsetResetPolicy: latest
