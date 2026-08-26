@@ -34,12 +34,12 @@
 ```mermaid
 flowchart TD
     Sensors[IoT Sensors & Telemetry Agents] -->|1. High-Frequency HTTP POST| Gate[Fastify Ingestion Gateway]
-    
+    Gate -.->|3. Instant HTTP 202 Accepted| Sensors
+
     subgraph IngestionBoundary [Edge Ingestion Layer]
         Gate -->|2. Hash Key Partition Routing| Kafka[Redpanda / Kafka Event Broker]
-        Gate -->>|3. Instant HTTP 202 Accepted| Sensors
     end
-    
+
     subgraph StreamPartitions [Redpanda Topic Partitions]
         Kafka --> Partition0[Partition 0: Device Group A]
         Kafka --> Partition1[Partition 1: Device Group B]
@@ -50,19 +50,17 @@ flowchart TD
         Prom[Prometheus Metrics Exporter] -->|Scrape Consumer Lag| KEDA[KEDA ScaledObject Auto-scaler]
         KEDA -->|Scale Pods 1 -> 10| Consumer[Batch Consumer Worker Pool]
     end
-    
+
     subgraph ResilientWorkerPool [Asynchronous Batch Consumers]
         Partition0 & Partition1 & Partition2 --> Consumer
         Consumer -->|4. Atomic SETNX Key Lock| Redis[(Redis Edge Deduplication Lock)]
-        
-        alt Message Duplicate
-            Redis-->>Consumer: Key Exists (Skip Processing)
-        else Malformed Payload / Unrecoverable Error
-            Consumer -->|5. Route to DLQ| DLQ[Dead-Letter Queue Topic]
-        else Message Unique & Valid
-            Redis-->>Consumer: Key Set (Proceed to Batch)
-            Consumer -->|6. Retry with Exp Backoff| Postgres[(PostgreSQL Telemetry DB)]
-        end
+        Redis --> Dup{Key Already Exists?}
+        Dup -->|Yes: Duplicate| Skip[Skip Processing]
+        Dup -->|No: Key Set| Valid{Payload Valid?}
+        Valid -->|Malformed / Unrecoverable| DLQRoute[5. Route to DLQ]
+        DLQRoute --> DLQ[Dead-Letter Queue Topic]
+        Valid -->|Valid| Write[6. Write with Exp Backoff Retry]
+        Write --> Postgres[(PostgreSQL Telemetry DB)]
     end
 ```
 
