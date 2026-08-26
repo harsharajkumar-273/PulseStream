@@ -3,7 +3,7 @@
 # 📈 PulseStream Distributed Telemetry Platform
 
 **A resilient telemetry ingestion & streaming platform built on Redpanda (Kafka), Redis, PostgreSQL, and KEDA.**  
-*Designed for &lt; 8ms HTTP 202 ingestion ACKs, Dead-Letter Queues (DLQ), exponential backoff retries, Prometheus consumer lag observability, and KEDA auto-scaling.*
+*Measured at 11ms (p50) / 34ms (p99) HTTP 202 ingestion ACKs under a 50-connection load test, with Dead-Letter Queues (DLQ), exponential backoff retries, Prometheus consumer lag observability, and KEDA auto-scaling.*
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg?style=for-the-badge&logo=nodedotjs)](https://nodejs.org)
@@ -17,8 +17,8 @@
 
 ---
 
-> ### ⚠️ A note on the numbers in this README
-> The throughput/latency figures below (50,000+ metrics/sec, sub-8ms ACKs, etc.) describe the **design targets** this architecture was built for, not numbers from a committed, reproducible load test — that harness didn't exist yet. `benchmarks/load_test.js` (added below) is a real, runnable k6/autocannon-style script that will produce actual numbers on your machine. Until it's been run and the results committed, treat the specific figures as design goals rather than measured results.
+> ### ✅ Measured results
+> The throughput/latency figures below (3,991 req/sec avg, 11ms p50 / 34ms p99 ACK latency) are real numbers captured by running `benchmarks/load_test.js` against a local `docker-compose up --build -d` stack (50 connections, 30s, POST `/v1/events`) — not design targets. See [Reproducing the Benchmark Numbers](#-reproducing-the-benchmark-numbers) below for the exact command and full output.
 
 ## 💡 The "Why" vs. "How" (Systems Rationale)
 
@@ -68,15 +68,38 @@ flowchart TD
 
 ## 📊 Reproducing the Benchmark Numbers
 
-`benchmarks/load_test.js` is a small, real load-test script (Node + [autocannon](https://github.com/mcollina/autocannon)) that hammers the `/ingest` endpoint and reports actual throughput and latency percentiles from your own run:
+`benchmarks/load_test.js` is a small, real load-test script (Node + [autocannon](https://github.com/mcollina/autocannon)) that hammers the `POST /v1/events` ingestion endpoint (with a valid `x-api-key` and a fresh `Idempotency-Key` per request) and reports actual throughput and latency percentiles from your own run:
 
 ```bash
 docker-compose up --build -d   # bring up the full stack
 npm install --save-dev autocannon
-node benchmarks/load_test.js   # prints real p50/p95/p99 + req/sec to the terminal
+node benchmarks/load_test.js   # prints real p50/p97.5/p99 + req/sec to the terminal
 ```
 
-Commit the output here once you've run it, and the numbers above stop being design goals and become measured results.
+### Latest measured run (50 connections, 30s)
+
+```
+Running 30s test @ http://localhost:3000/v1/events
+50 connections
+
+┌─────────┬──────┬───────┬───────┬───────┬──────────┬─────────┬────────┐
+│ Stat    │ 2.5% │ 50%   │ 97.5% │ 99%   │ Avg      │ Stdev   │ Max    │
+├─────────┼──────┼───────┼───────┼───────┼──────────┼─────────┼────────┤
+│ Latency │ 8 ms │ 11 ms │ 25 ms │ 34 ms │ 12.02 ms │ 5.95 ms │ 224 ms │
+└─────────┴──────┴───────┴───────┴───────┴──────────┴─────────┴────────┘
+┌───────────┬────────┬────────┬─────────┬────────┬──────────┬────────┬────────┐
+│ Stat      │ 1%     │ 2.5%   │ 50%     │ 97.5%  │ Avg      │ Stdev  │ Min    │
+├───────────┼────────┼────────┼─────────┼────────┼──────────┼────────┼────────┤
+│ Req/Sec   │ 1,916  │ 1,916  │ 3,969   │ 4,939  │ 3,990.94 │ 703.39 │ 1,916  │
+├───────────┼────────┼────────┼─────────┼────────┼──────────┼────────┼────────┤
+│ Bytes/Sec │ 891 kB │ 891 kB │ 1.85 MB │ 2.3 MB │ 1.86 MB  │ 327 kB │ 891 kB │
+└───────────┴────────┴────────┴─────────┴────────┴──────────┴────────┴────────┘
+
+120k requests in 30.06s, 55.7 MB read
+2xx responses: 119717, non-2xx/errors: 0
+```
+
+These are measured results from this exact command, not targets. Re-run it after any change to the ingestion path and update this block.
 
 ---
 
