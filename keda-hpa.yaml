@@ -15,6 +15,6 @@ spec:
       metadata:
         bootstrapServers: redpanda:9092
         consumerGroup: pulsestream-metrics-group
-        topic: telemetry-stream
+        topic: metrics.raw
         lagThreshold: "100"
         offsetResetPolicy: latest
