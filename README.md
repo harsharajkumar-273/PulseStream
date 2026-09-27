@@ -1,104 +1,69 @@
-<div align="center">
+# PulseStream
 
-# 📈 PulseStream Distributed Telemetry Platform
+A telemetry ingestion pipeline: devices POST events to an Express API, the API publishes them to Redpanda (Kafka-compatible), and a batch consumer writes them to PostgreSQL. Idempotency keys, a dead-letter topic, Prometheus metrics, and an optional Spark stage for windowed aggregates.
 
-**A resilient telemetry ingestion & streaming platform built on Redpanda (Kafka), Redis, PostgreSQL, and KEDA.**  
-*Measured at 11ms (p50) / 36ms (p99) HTTP 202 ingestion ACKs, with 0 events lost / 0 duplicated across injected consumer-and-database crashes, Dead-Letter Queues (DLQ), exponential backoff retries, Prometheus observability, and KEDA auto-scaling proven on a real Kubernetes cluster.*
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Redpanda](https://img.shields.io/badge/Redpanda-Kafka_API-E4405F?style=flat-square)](https://redpanda.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg?style=for-the-badge&logo=nodedotjs)](https://nodejs.org)
-[![Kafka/Redpanda](https://img.shields.io/badge/Redpanda-Kafka_Compatible-red.svg?style=for-the-badge&logo=redpanda)](https://redpanda.com/)
-[![KEDA Auto-scaling](https://img.shields.io/badge/KEDA-Consumer_Lag_HPA-blue.svg?style=for-the-badge&logo=kubernetes)](https://keda.sh/)
-[![Redis](https://img.shields.io/badge/Redis-SETNX_Lock-red.svg?style=for-the-badge&logo=redis)](https://redis.io)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Batch_Upserts-blue.svg?style=for-the-badge&logo=postgresql)](https://www.postgresql.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
-
-</div>
-
----
-
-> ### ✅ Measured results
-> Every number in this README is a real, reproducible measurement, not a design target: HTTP ACK latency and end-to-end persisted throughput from `benchmarks/load_test.js` / `benchmarks/e2e_benchmark.js`, data-loss behavior under real process crashes from `benchmarks/crash_test.js`, and consumer autoscaling from a real KEDA deployment (`cluster/`), not just a docker-compose simulation. See [Reproducing the Benchmark Numbers](#-reproducing-the-benchmark-numbers) and [Correctness Under Failure](#-correctness-under-failure-crash-injection-testing) below for exact commands and full output.
-
-## 💡 The "Why" vs. "How" (Systems Rationale)
-
-* **The Bottleneck (Why telemetry pipelines fail during outages)**:  
-  Directly writing high-frequency metric streams into relational databases causes connection pool exhaustion, transaction log saturation, and catastrophic web server crashes when downstream DBs lag. Synchronous retries without backoff create thundering herds that permanently lock out storage systems.
-* **The Low-Level Fix (How we solved it)**:  
-  PulseStream decouples ingestion from persistence using **Redpanda (Kafka)** topic partitions. Payloads publish asynchronously. Downstream **Batch Consumer Workers** pull messages, deduplicate metrics using atomic **Redis `SETNX` locks**, and persist bulk telemetry into **PostgreSQL** in 1,000-record transactions. Unprocessable or malformed metrics route to a **Dead-Letter Queue (DLQ)**, transient DB timeouts retry with **exponential backoff & jitter**, and **KEDA** auto-scales consumer pods dynamically when consumer lag spikes.
+| | |
+|---|---|
+| **Measured** | 3,653 req/s average, 11 ms p50 / 36 ms p99 ingestion acknowledgments (50 connections, 30 s, local Docker, 0 errors) |
+| **Also measured** | 2,933 events/s actually persisted to PostgreSQL end-to-end, p50 3.7 s / p99 10.3 s produce-to-durable-row latency under the same load — see [Benchmark](#benchmark) |
+| **Also measured** | 0 events lost / 0 duplicated across repeated `SIGKILL`s of the consumer and database mid-batch — see [Correctness under failure](#correctness-under-failure) |
+| **Stack** | Express · KafkaJS · Redpanda · Redis · PostgreSQL · Prometheus/Grafana · Spark + Delta Lake (optional) |
 
 ---
 
-## 🏗️ High-Throughput Event Streaming Topology
+## How it works
 
 ```mermaid
-flowchart TD
-    Sensors[IoT Sensors & Telemetry Agents] -->|1. High-Frequency HTTP POST| Gate[Express Ingestion Gateway]
-    Gate -.->|3. Instant HTTP 202 Accepted| Sensors
-
-    subgraph IngestionBoundary [Edge Ingestion Layer]
-        Gate -->|2. Hash Key Partition Routing| Kafka[Redpanda / Kafka Event Broker]
-    end
-
-    subgraph StreamPartitions [Redpanda Topic Partitions]
-        Kafka --> Partition0[Partition 0: Device Group A]
-        Kafka --> Partition1[Partition 1: Device Group B]
-        Kafka --> Partition2[Partition 2: Device Group C]
-    end
-
-    subgraph AutoScaling [KEDA Consumer Lag HPA]
-        Prom[Prometheus Metrics Exporter] -->|Scrape Consumer Lag| KEDA[KEDA ScaledObject Auto-scaler]
-        KEDA -->|Scale Pods 1 -> 10| Consumer[Batch Consumer Worker Pool]
-    end
-
-    subgraph ResilientWorkerPool [Asynchronous Batch Consumers]
-        Partition0 & Partition1 & Partition2 --> Consumer
-        Consumer -->|4. Atomic SETNX Key Lock| Redis[(Redis Edge Deduplication Lock)]
-        Redis --> Dup{Key Already Exists?}
-        Dup -->|Yes: Duplicate| Skip[Skip Processing]
-        Dup -->|No: Key Set| Valid{Payload Valid?}
-        Valid -->|Malformed / Unrecoverable| DLQRoute[5. Route to DLQ]
-        DLQRoute --> DLQ[Dead-Letter Queue Topic]
-        Valid -->|Valid| Write[6. Write with Exp Backoff Retry]
-        Write --> Postgres[(PostgreSQL Telemetry DB)]
-    end
+flowchart LR
+    Dev[Devices] -->|POST /v1/events<br/>x-api-key + Idempotency-Key| API[Express API]
+    API -->|SET NX lock| Redis[(Redis)]
+    API -->|publish, key = deviceId| Raw[[metrics.raw]]
+    API -.->|202 Accepted| Dev
+    Raw --> Con[Batch consumer]
+    Con -->|INSERT ... ON CONFLICT DO NOTHING| PG[(PostgreSQL)]
+    Con -->|poison messages| DLQ[[metrics.dlq]]
+    Raw --> Spark[Spark windowed aggregates<br/>to Delta Lake]
 ```
+
+1. **Ingest.** The API checks the API key, validates the body with Zod, and takes a Redis `SET NX` lock on the `Idempotency-Key` so a retried request isn't published twice. It publishes to `metrics.raw` (3 partitions) keyed by `deviceId`, so each device's events stay ordered within one partition, then returns `202 Accepted`.
+2. **Persist.** The consumer reads batches and writes each batch inside one PostgreSQL transaction, with a `SAVEPOINT` per message so one bad record can't take its batch neighbors down with it. `ON CONFLICT (id) DO NOTHING` makes redelivered events harmless.
+3. **Isolate failures.** A message that can't be parsed or inserted rolls back to its savepoint and goes to `metrics.dlq` instead of blocking its partition or poisoning the rest of the batch. A database-level failure (e.g. the connection itself drops) rolls back the whole batch and lets KafkaJS retry with exponential backoff — Kafka offsets and DLQ sends are only acted on *after* the batch's transaction durably commits, so a crash mid-batch can't advance past events that were never actually written.
+4. **Observe.** Both services expose Prometheus metrics (request counts, in-flight requests, processed and failed events, DB write duration). Grafana ships in the compose file.
+5. **Aggregate (optional).** `src/spark_processor.py` reads the topic with Spark Structured Streaming and writes windowed averages, minimums, maximums, and counts to Delta Lake.
+
+Design write-up: [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md).
 
 ---
 
-## 📊 Reproducing the Benchmark Numbers
+## Benchmark
 
-There are two different benchmarks here, measuring two different things:
-
-- `benchmarks/load_test.js` measures how fast the gateway answers with **HTTP 202** — ingestion-edge latency. It's driven by [autocannon](https://github.com/mcollina/autocannon).
-- `benchmarks/e2e_benchmark.js` measures how many events per second actually make it **all the way through and land a durable Postgres row** (gateway → Redpanda → consumer batch insert → commit), and how long that round trip takes. This is the number that actually matters for a telemetry pipeline — a fast HTTP ACK doesn't mean the event survived.
+Two scripts measure two different things. [`benchmarks/load_test.js`](benchmarks/load_test.js) (via [autocannon](https://github.com/mcollina/autocannon)) measures how fast the API answers with `202` — ingestion-edge latency. [`benchmarks/e2e_benchmark.js`](benchmarks/e2e_benchmark.js) measures how many events per second actually land a durable row in PostgreSQL, and how long that full round trip takes — the number that actually matters for a telemetry pipeline, since a fast HTTP ACK doesn't mean the event survived.
 
 ```bash
-docker-compose up --build -d   # bring up the full stack (also provisions metrics.raw with 3 partitions)
+docker-compose up --build -d   # also provisions metrics.raw with 3 partitions
 npm install --save-dev autocannon
-node benchmarks/load_test.js                          # HTTP ACK latency + req/sec
-node benchmarks/e2e_benchmark.js                       # events actually persisted/sec + true end-to-end latency
+node benchmarks/load_test.js       # HTTP ACK latency + req/s
+node benchmarks/e2e_benchmark.js   # events actually persisted/s + true end-to-end latency
 ```
 
-### HTTP ACK latency (50 connections, 30s, `load_test.js`)
+Latest recorded runs (50 connections, 30 s):
 
 ```
-Running 30s test @ http://localhost:3000/v1/events
-50 connections
-
+# load_test.js — HTTP ACK latency
 ┌─────────┬──────┬───────┬───────┬───────┬──────────┬──────────┬─────────┐
 │ Stat    │ 2.5% │ 50%   │ 97.5% │ 99%   │ Avg      │ Stdev    │ Max     │
 ├─────────┼──────┼───────┼───────┼───────┼──────────┼──────────┼─────────┤
 │ Latency │ 8 ms │ 11 ms │ 27 ms │ 36 ms │ 13.17 ms │ 23.53 ms │ 1073 ms │
 └─────────┴──────┴───────┴───────┴───────┴──────────┴──────────┴─────────┘
+Req/Sec avg 3,653.27 · 110k requests in 30.04 s · 2xx: 109,582 · errors: 0
 
-Requests/sec (avg): 3,653.27
-110k requests in 30.04s, 51 MB read, 2xx responses: 109,582, non-2xx/errors: 0
-```
-
-### End-to-end persistence (50 connections, 30s, `e2e_benchmark.js`)
-
-```
+# e2e_benchmark.js — events actually persisted in Postgres
 Sent (202 ACKed):        88,004
 Persisted in Postgres:   88,004
 Lost (never persisted):  0
@@ -106,19 +71,17 @@ Persisted events/sec:    2,932.7 (over the 30.0s send window)
 End-to-end latency p50/p95/p99 (ms): 3,725 / 9,321 / 10,345
 ```
 
-The gap between these two is the honest finding: the gateway ACKs in ~11ms, but under a sustained 50-connection burst the consumer can't keep up in real time, so a durable write can lag the HTTP 202 by several seconds (backlog builds, then drains). That's exactly what [KEDA autoscaling](#-keda-consumer-lag-autoscaling-proven-on-a-real-cluster) below is for — this is the backlog pattern it scales out on.
-
-These are measured results from these exact commands, not targets. Re-run them after any change to the ingestion or consumer path and update this block.
+The gap between the two is the honest finding: the API ACKs in ~11ms, but under a sustained 50-connection burst the consumer can't keep up in real time, so a durable write can lag the HTTP `202` by several seconds while a backlog builds and drains. That's the exact backlog pattern [KEDA autoscaling](#keda-autoscaling) below is meant to shrink.
 
 ---
 
-## 🛡️ Correctness Under Failure (Crash-Injection Testing)
+## Correctness under failure
 
-A batch-transaction bug was found and fixed in the consumer (`src/consumer.ts`): it committed Kafka offsets *inside* the per-message loop, before the batch's Postgres transaction ever reached `COMMIT`, and it had no per-message savepoints — so one malformed message would abort the whole Postgres transaction and silently take every other message in that batch down with it (misrouted to the DLQ or, worse, lost if the process died between an early offset commit and the final `COMMIT`).
+The consumer used to resolve each message's Kafka offset — and send DLQ messages — *inside* the per-message loop, before the batch's PostgreSQL transaction ever reached `COMMIT`. Two related problems followed: once any single insert threw, Postgres aborted the whole transaction, so every subsequent message in that batch also failed and was misrouted to the DLQ even though it was perfectly valid; and if the process crashed between an early offset resolution and the final `COMMIT`, Kafka could advance past events whose insert was never actually durable — silent, permanent data loss.
 
-**The fix**: a `SAVEPOINT` per message (so one bad record can't poison its neighbors), and offsets/DLQ sends are only acted on *after* the batch's Postgres transaction durably commits.
+**Fix:** a `SAVEPOINT` per message isolates one bad record from its batch neighbors, and offsets/DLQ sends are only acted on after the batch's transaction durably commits (see [`src/consumer.ts`](src/consumer.ts)).
 
-`benchmarks/crash_test.js` proves it: it produces a batch of uniquely-identified events straight onto `metrics.raw` while repeatedly `SIGKILL`-ing the consumer and/or Postgres containers mid-stream (a real crash, not a graceful shutdown), then diffs every sent id against what's actually stored once the consumer drains.
+[`benchmarks/crash_test.js`](benchmarks/crash_test.js) produces a batch of uniquely-identified events straight onto `metrics.raw` while repeatedly `SIGKILL`-ing the consumer and/or Postgres containers mid-stream (a real crash, not a graceful shutdown), then diffs every sent id against what's actually stored once the consumer drains:
 
 ```bash
 docker-compose up --build -d
@@ -126,59 +89,41 @@ node benchmarks/crash_test.js --count 3000 --kills 3
 ```
 
 ```
-=== Crash-injection test result ===
 Sent:              3000
 Stored (matched):  3000
 Lost:              0
 Duplicated:        0
 Injected crashes:  3
-events table rows: 0 -> 3000
-====================================
 ✅ PASS: 0 lost / 0 duplicated across 3 injected crashes.
 ```
 
-For comparison, running the exact same test against the pre-fix consumer code with a single malformed message mixed into one batch (no crash required) sent 2 perfectly valid sibling events straight to the DLQ, because the poison message aborted the shared Postgres transaction and every subsequent insert in that batch inherited the same "current transaction is aborted" error.
+For comparison, running the same test against the pre-fix code with a single malformed message mixed into one batch — no crash required — sent 2 perfectly valid sibling events straight to the DLQ, because the poison message aborted the shared transaction and every subsequent insert in that batch inherited the same "current transaction is aborted" error.
 
 ---
 
-## ⚡ Core Technical Features
+## Quick start
 
-1. **Decoupled Edge Ingestion**:  
-   The Express gateway publishes directly to Redpanda topic partitions based on `deviceId` hash keys, acknowledging clients quickly without waiting on downstream persistence.
-2. **Resilient Failure Handling (DLQ, per-message savepoints & transactional offsets)**:  
-   Unprocessable or schema-invalid messages route to `metrics.dlq` for offline inspection, isolated from the rest of their batch by a Postgres `SAVEPOINT` per message. Kafka offsets are only resolved (and DLQ sends only made) after the batch's DB transaction durably commits — see [Correctness Under Failure](#-correctness-under-failure-crash-injection-testing).
-3. **Prometheus & Grafana Observability**:  
-   Exposes `/metrics` on the consumer tracking `pulsestream_consumer_events_processed_total`, `pulsestream_consumer_events_failed_total`, and `pulsestream_consumer_db_write_duration_seconds`.
-4. **KEDA Kafka Consumer Lag Auto-Scaling**:  
-   `keda-hpa.yaml` scales `pulsestream-consumer-deployment` replicas (up to `maxReplicaCount: 10`, capped in practice by `metrics.raw`'s 3 partitions) when consumer-group lag exceeds `lagThreshold: "100"`. Proven on a real local Kubernetes cluster, not just simulated — see [below](#-keda-consumer-lag-autoscaling-proven-on-a-real-cluster).
-
----
-
-## 🚀 Quick Start (< 1 Minute)
-
-### Option A: Run via Docker Compose (Complete Stack)
 ```bash
-# Clone repository
 git clone https://github.com/harsharajkumar-273/PulseStream.git
 cd PulseStream
-
-# Spin up Gateway, Redpanda, Redis, PostgreSQL, Prometheus & Grafana
 docker-compose up --build
 ```
-* **Ingestion Gateway**: `http://localhost:3000`
-* **Redpanda Console**: `http://localhost:8080`
-* **Grafana Dashboard**: `http://localhost:3001` (Admin/admin)
 
-### Option B: Deploy KEDA Auto-scaling in Kubernetes
-`kubectl apply -f keda-hpa.yaml` alone does **not** work — it needs a real cluster, the KEDA operator, and a `pulsestream-consumer-deployment` to scale, none of which exist by default. `cluster/` is a minimal, self-contained set of manifests (Postgres, Redis, Redpanda, the consumer) plus setup steps for a local `kind` cluster that make `keda-hpa.yaml` actually do something — see [`cluster/README.md`](cluster/README.md) and the results below.
+| Service | URL |
+|---|---|
+| Ingestion API | http://localhost:3000 |
+| Consumer metrics | http://localhost:3001/metrics |
+| Grafana | http://localhost:3002 |
+
+`src/simulator.ts` sends sample device traffic, including duplicate requests to show the idempotency check returning `409 Conflict`.
 
 ---
 
-## 📈 KEDA Consumer-Lag Autoscaling (Proven on a Real Cluster)
+## KEDA autoscaling
 
-`keda-hpa.yaml` originally pointed at the wrong Kafka port (`redpanda:9092`, the *external* listener, when in-cluster clients need `redpanda:29092`) and the wrong topic name (`telemetry-stream` instead of the actual `metrics.raw`) — it had never actually been run. Getting it working end to end also surfaced a real Kubernetes DNS gotcha: **the KEDA operator resolves the broker hostname from its own pod's namespace** (`keda`), not the target deployment's namespace, so Redpanda's advertised address had to be the fully-qualified `redpanda.default.svc.cluster.local:29092` — a bare `redpanda` only resolves for pods already in the `default` namespace.
+[`keda-hpa.yaml`](keda-hpa.yaml) scales the consumer on `metrics.raw` consumer-group lag. It's been deployed and proven on a real local Kubernetes cluster (not just configuration) — see [`cluster/`](cluster/) for the manifests and setup. Getting it actually working surfaced three real bugs: the broker address pointed at Redpanda's *external* listener instead of the internal one, the topic name didn't match what the app uses, and a Kubernetes DNS gotcha — **the KEDA operator resolves the broker hostname from its own pod's namespace** (`keda`), not the target deployment's, so Redpanda's advertised address had to be fully-qualified.
 
-Reproduction (see [`cluster/README.md`](cluster/README.md) for full setup): a `kind` cluster, the KEDA operator via Helm, the manifests in `cluster/`, and one 300,000-event burst sent straight to `metrics.raw`, sampling `kubectl get hpa` / `kubectl get pods` every few seconds:
+Measured run (300,000-event burst against a `kind` cluster):
 
 ```
 t=3s    lag/threshold ratio 300/100   desired=1  running_pods=3   (spinning up)
@@ -187,11 +132,18 @@ t=42s   lag/threshold ratio   0/100   desired=3  running_pods=3   (drained)
 ~5 min later (HPA's default scale-down stabilization window): back to 1 replica
 ```
 
-`pulsestream-consumer-deployment` scaled from **1 → 3 real Kubernetes pods** (capped at 3, matching `metrics.raw`'s 3 partitions — a 4th replica would have no partition to own and sit idle) purely off Kafka consumer-group lag, held there while draining, then scaled back down once the backlog cleared. All 300,000 events landed in Postgres with 0 loss.
+`pulsestream-consumer-deployment` scaled from 1 → 3 real pods (capped there by `metrics.raw`'s 3 partitions — a 4th replica would have no partition to own) purely off Kafka consumer-group lag, then scaled back down once the backlog cleared. All 300,000 events landed in Postgres with 0 loss.
 
-`benchmarks/lag_chart.js` is a faster, no-cluster stand-in for the same underlying behavior against docker-compose (extra consumer replicas as plain `docker run` containers, since `metrics-consumer`'s fixed `container_name`/port block `docker-compose --scale`): a single 300,000-event burst, scaled from 1→3 replicas mid-drain, went from **~2,972 events/sec drained at 1 replica to ~8,404 events/sec at 3 replicas (~2.8x)**.
+[`benchmarks/lag_chart.js`](benchmarks/lag_chart.js) is a faster, no-cluster stand-in against docker-compose for the same underlying mechanism: a single 300,000-event burst, scaled from 1→3 replicas mid-drain, went from ~2,972 events/s drained at 1 replica to ~8,404 events/s at 3 replicas (~2.8x).
 
 ---
 
-## 📜 License
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+## Limitations
+
+- The benchmarks ran on one machine with everything in Docker. These are not production capacity numbers.
+- `benchmarks/crash_test.js` and `benchmarks/e2e_benchmark.js` are targeted failure/latency checks, not a general automated test suite.
+- The KEDA cluster proof uses a local `kind` cluster with everything (Postgres, Redis, Redpanda, consumer) redeployed in-cluster for isolation, not the exact docker-compose stack — see [`cluster/README.md`](cluster/README.md) for how it differs.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
