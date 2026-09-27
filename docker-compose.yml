@@ -102,6 +102,19 @@ services:
       redpanda:
         condition: service_healthy
 
+  # Ensures metrics.raw has 3 partitions (not Redpanda's auto-create default
+  # of 1) so consumer replicas beyond 1 ever have a partition to own — this
+  # is what makes keda-hpa.yaml's maxReplicaCount meaningful at all.
+  create-topic:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "rpk topic create metrics.raw --partitions 3 --brokers redpanda:29092 ||
+             rpk topic add-partitions metrics.raw --num 2 --brokers redpanda:29092 || true"
+    restart: "no"
+
   # 6. Observability: Prometheus
   prometheus:
     image: prom/prometheus:latest
