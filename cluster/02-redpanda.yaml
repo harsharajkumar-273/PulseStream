@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redpanda
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      containers:
+        - name: redpanda
+          image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+          args:
+            - redpanda
+            - start
+            - --mode
+            - dev-container
+            - --smp
+            - "1"
+            - --memory
+            - 1G
+            - --overprovisioned
+            - --node-id
+            - "0"
+            - --kafka-addr
+            - PLAINTEXT://0.0.0.0:29092
+            # Must be resolvable from ANY namespace: Kafka clients reconnect
+            # using this advertised address after the initial bootstrap, and
+            # KEDA's operator (namespace "keda") can't resolve a bare
+            # "redpanda" short name that only exists in "default"'s DNS search path.
+            - --advertise-kafka-addr
+            - PLAINTEXT://redpanda.default.svc.cluster.local:29092
+          ports:
+            - containerPort: 29092
+            - containerPort: 9644
+          readinessProbe:
+            exec:
+              command: ["rpk", "cluster", "info"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: default
+spec:
+  selector:
+    app: redpanda
+  ports:
+    - name: kafka
+      port: 29092
+      targetPort: 29092
+    - name: admin
+      port: 9644
+      targetPort: 9644
+---
+# 3 partitions so KEDA scaling out to >1 replica is actually meaningful
+# (each replica in the consumer group can only own whole partitions).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-topic
+  namespace: default
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-topic
+          image: docker.redpanda.com/redpandadata/redpanda:v23.2.1
+          command:
+            - sh
+            - -c
+            - "rpk topic create metrics.raw --partitions 3 --brokers redpanda:29092 || rpk topic add-partitions metrics.raw --num 2 --brokers redpanda:29092 || true"

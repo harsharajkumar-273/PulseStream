@@ -13,8 +13,19 @@ spec:
   triggers:
     - type: kafka
       metadata:
-        bootstrapServers: redpanda:9092
+        # 29092 is Redpanda's internal PLAINTEXT listener; 9092 is the
+        # OUTSIDE listener meant for clients outside the cluster/network
+        # (see docker-compose.yml's --advertise-kafka-addr). KEDA runs
+        # in-cluster, so it must use the internal address.
+        #
+        # Fully-qualified (not just "redpanda"): the KEDA operator resolves
+        # this hostname from its OWN pod's namespace (typically "keda"), not
+        # from pulsestream-consumer-deployment's namespace, so a bare
+        # short name only resolves if KEDA happens to share that namespace.
+        bootstrapServers: redpanda.default.svc.cluster.local:29092
         consumerGroup: pulsestream-metrics-group
-        topic: telemetry-stream
+        # Must match the topic the gateway/consumer actually use
+        # (KAFKA_TOPIC in src/routes/event.ts and src/consumer.ts).
+        topic: metrics.raw
         lagThreshold: "100"
         offsetResetPolicy: latest

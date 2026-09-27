@@ -50,13 +50,29 @@ const startConsumer = async () => {
         const timer = dbWriteDuration.startTimer();
         const pgClient = await db.connect();
 
+        // Outcomes are only acted on (offsets resolved, DLQ sent, metrics bumped)
+        // after the batch transaction commits. Resolving an offset or sending to
+        // the DLQ before the COMMIT would let Kafka move past a message whose
+        // insert is later rolled back — a silent, permanent data loss window.
+        type Outcome =
+          | { status: 'stored'; message: (typeof batch.messages)[number] }
+          | { status: 'dlq'; message: (typeof batch.messages)[number] };
+        const outcomes: Outcome[] = [];
+
         try {
           // Begin Database Transaction for the batch
           await pgClient.query('BEGIN');
 
+          let i = 0;
           for (const message of batch.messages) {
             // Respect consumer cancellation tokens
             if (!isRunning() || isStale()) break;
+
+            const savepoint = `sp_${i++}`;
+            // A savepoint isolates one message's failure from the rest of the
+            // batch: without it, a single bad insert aborts the whole Postgres
+            // transaction and every subsequent message in the batch fails too.
+            await pgClient.query(`SAVEPOINT ${savepoint}`);
 
             try {
               const rawValue = message.value?.toString();
@@ -80,27 +96,13 @@ const startConsumer = async () => {
                 ]
               );
 
-              eventsProcessedCounter.inc();
-              resolveOffset(message.offset);
+              await pgClient.query(`RELEASE SAVEPOINT ${savepoint}`);
+              outcomes.push({ status: 'stored', message });
             } catch (err) {
               console.error('❌ Error processing single message, routing to DLQ:', err);
-              
-              // Increment failed metrics counter
-              eventsFailedCounter.inc();
-
-              // Route poison pill to DLQ topic
-              await dlqProducer.send({
-                topic: DLQ_TOPIC,
-                messages: [
-                  {
-                    key: message.key,
-                    value: message.value,
-                  },
-                ],
-              });
-
-              // Commit offset anyway so we don't block subsequent events in the partition
-              resolveOffset(message.offset);
+              await pgClient.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+              await pgClient.query(`RELEASE SAVEPOINT ${savepoint}`);
+              outcomes.push({ status: 'dlq', message });
             }
 
             // Tell Kafka broker this consumer is still healthy
@@ -114,11 +116,33 @@ const startConsumer = async () => {
           // Rollback the entire transaction on DB failures (e.g. database network error)
           await pgClient.query('ROLLBACK');
           console.error('❌ Transaction rolled back due to error:', transactionError);
-          
-          // Re-throw so KafkaJS handles reconnection retries
-          throw transactionError; 
+
+          // Nothing in `outcomes` gets acted on: no offsets resolved and no DLQ
+          // sends, so KafkaJS will redeliver this whole batch from the last
+          // committed offset once retries reconnect.
+          throw transactionError;
         } finally {
           pgClient.release();
+        }
+
+        // The DB transaction is durably committed at this point, so it's now
+        // safe to fan out side effects and let Kafka advance past these offsets.
+        for (const outcome of outcomes) {
+          if (outcome.status === 'stored') {
+            eventsProcessedCounter.inc();
+          } else {
+            eventsFailedCounter.inc();
+            await dlqProducer.send({
+              topic: DLQ_TOPIC,
+              messages: [
+                {
+                  key: outcome.message.key,
+                  value: outcome.message.value,
+                },
+              ],
+            });
+          }
+          resolveOffset(outcome.message.offset);
         }
       },
     });

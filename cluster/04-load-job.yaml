@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: burst-producer-script
+  namespace: default
+data:
+  burst.cjs: |
+    // Sends a burst of events directly onto metrics.raw to create a Kafka
+    // consumer-lag spike for KEDA's kafka trigger to react to. Uses kafkajs
+    // from the consumer image's own node_modules (no extra install needed).
+    const { Kafka } = require("kafkajs");
+    const crypto = require("crypto");
+
+    const TOTAL = Number(process.env.BURST_COUNT || 300000);
+    const TOPIC = "metrics.raw";
+
+    async function main() {
+      const kafka = new Kafka({ clientId: "cluster-load-job", brokers: ["redpanda:29092"] });
+      const producer = kafka.producer();
+      await producer.connect();
+
+      const BATCH_SIZE = 500;
+      for (let sent = 0; sent < TOTAL; sent += BATCH_SIZE) {
+        const n = Math.min(BATCH_SIZE, TOTAL - sent);
+        const messages = [];
+        for (let i = 0; i < n; i++) {
+          messages.push({
+            key: `device-${(sent + i) % 300}`,
+            value: JSON.stringify({
+              id: crypto.randomUUID(),
+              deviceId: crypto.randomUUID(),
+              eventType: "temperature",
+              value: Math.random() * 100,
+              timestamp: Date.now(),
+            }),
+          });
+        }
+        await producer.send({ topic: TOPIC, messages });
+      }
+      console.log(`Sent ${TOTAL} events.`);
+      await producer.disconnect();
+    }
+
+    main().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: burst-load
+  namespace: default
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: burst-load
+          image: pulsestream-metrics-consumer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["node", "/scripts/burst.cjs"]
+          env:
+            - name: BURST_COUNT
+              value: "300000"
+            # The script lives outside /usr/src/app, so Node's default
+            # module resolution (walk up from the script's own dir) won't
+            # find kafkajs in /usr/src/app/node_modules without this.
+            - name: NODE_PATH
+              value: /usr/src/app/node_modules
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: burst-producer-script
