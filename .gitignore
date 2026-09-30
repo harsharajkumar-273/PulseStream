@@ -8,6 +8,10 @@ yarn-error.log*
 # Compiled JavaScript output
 dist/
 
+# Maven build output (pipeline-java)
+pipeline-java/target/
+pipeline-java/dependency-reduced-pom.xml
+
 # Environment variables (secret credentials)
 .env
 .env.local
