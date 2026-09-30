@@ -1,6 +1,5 @@
 package com.pulsestream.pipeline;
 
-import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import org.apache.beam.sdk.transforms.Combine;
@@ -17,6 +16,7 @@ import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 
 /**
  * The core of the pipeline: event-time sliding-window aggregation by
@@ -41,8 +41,14 @@ public class WindowAndAggregate extends PTransform<PCollection<MetricEvent>, PCo
 
     PCollection<MetricEvent> windowed = timestamped.apply(
         "SlidingWindow5MinEvery1Min",
-        Window.into(SlidingWindows.of(Duration.standardMinutes(5)).every(Duration.standardMinutes(1)))
-            .withAllowedLateness(Duration.standardMinutes(10)));
+        Window.<MetricEvent>into(
+                SlidingWindows.of(Duration.standardMinutes(5)).every(Duration.standardMinutes(1)))
+            .withAllowedLateness(Duration.standardMinutes(10))
+            // Accumulating (not discarding): a late-arriving event within the
+            // allowed-lateness window must refine the window's existing
+            // totals, not emit a separate, disjoint delta pane for just that
+            // one event.
+            .accumulatingFiredPanes());
 
     PCollection<KV<String, Double>> keyed = windowed.apply(
         "KeyByEventType",
