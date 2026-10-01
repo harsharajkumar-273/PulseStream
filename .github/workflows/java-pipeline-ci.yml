@@ -1,0 +1,41 @@
+name: Java Pipeline CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pipeline-java/**'
+      - '.github/workflows/java-pipeline-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pipeline-java/**'
+      - '.github/workflows/java-pipeline-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: pipeline-java
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Run unit tests (DirectRunner, no external services)
+        run: mvn -B test
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: pipeline-java/target/surefire-reports/
+      - name: Package
+        run: mvn -B package -DskipTests
