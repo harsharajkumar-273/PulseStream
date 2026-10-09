@@ -35,17 +35,6 @@ const dbWriteDuration = new client.Histogram({
 const consumer = kafka.consumer({ groupId: 'pulsestream-metrics-group' });
 const dlqProducer = kafka.producer();
 
-// KafkaJS stops the consumer for good on a non-retriable error (e.g. a failed
-// DLQ send) while this process and its /health endpoint stay up, which is a
-// silent outage. Exit so the orchestrator restarts us; uncommitted offsets are
-// redelivered and ON CONFLICT DO NOTHING makes that safe.
-consumer.on(consumer.events.CRASH, ({ payload }) => {
-  if (!payload.restart) {
-    console.error('❌ Consumer crashed and will not auto-restart; exiting for the orchestrator to restart:', payload.error);
-    process.exit(1);
-  }
-});
-
 const startConsumer = async () => {
   try {
     console.log('🔄 Initializing Kafka Consumer...');
@@ -61,29 +50,13 @@ const startConsumer = async () => {
         const timer = dbWriteDuration.startTimer();
         const pgClient = await db.connect();
 
-        // Outcomes are only acted on (offsets resolved, DLQ sent, metrics bumped)
-        // after the batch transaction commits. Resolving an offset or sending to
-        // the DLQ before the COMMIT would let Kafka move past a message whose
-        // insert is later rolled back — a silent, permanent data loss window.
-        type Outcome =
-          | { status: 'stored'; message: (typeof batch.messages)[number] }
-          | { status: 'dlq'; message: (typeof batch.messages)[number] };
-        const outcomes: Outcome[] = [];
-
         try {
           // Begin Database Transaction for the batch
           await pgClient.query('BEGIN');
 
-          let i = 0;
           for (const message of batch.messages) {
             // Respect consumer cancellation tokens
             if (!isRunning() || isStale()) break;
-
-            const savepoint = `sp_${i++}`;
-            // A savepoint isolates one message's failure from the rest of the
-            // batch: without it, a single bad insert aborts the whole Postgres
-            // transaction and every subsequent message in the batch fails too.
-            await pgClient.query(`SAVEPOINT ${savepoint}`);
 
             try {
               const rawValue = message.value?.toString();
@@ -94,11 +67,10 @@ const startConsumer = async () => {
               const event = JSON.parse(rawValue);
 
               // SQL Batch Insertion with ON CONFLICT DO NOTHING (idempotency check)
-              const inserted = await pgClient.query(
+              await pgClient.query(
                 `INSERT INTO events (id, device_id, event_type, value, timestamp)
                  VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (id) DO NOTHING
-                 RETURNING id`,
+                 ON CONFLICT (id) DO NOTHING`,
                 [
                   event.id,
                   event.deviceId,
@@ -108,35 +80,27 @@ const startConsumer = async () => {
                 ]
               );
 
-              // An existing row is only a harmless redelivery if it holds the
-              // same payload. The gateway's payload fingerprint lives in Redis
-              // and can be gone (state loss, lock expiry), so a replay of the
-              // same key with different data can reach this point; keep the
-              // first payload and dead-letter the conflict instead of dropping it.
-              if (inserted.rowCount === 0) {
-                const { rows } = await pgClient.query(
-                  'SELECT device_id, event_type, value, timestamp FROM events WHERE id = $1',
-                  [event.id]
-                );
-                const row = rows[0];
-                if (
-                  row &&
-                  (String(row.device_id).toLowerCase() !== String(event.deviceId).toLowerCase() ||
-                    row.event_type !== event.eventType ||
-                    row.value !== event.value ||
-                    Number(row.timestamp) !== event.timestamp)
-                ) {
-                  throw new Error(`Idempotency conflict: event ${event.id} already stored with a different payload`);
-                }
-              }
-
-              await pgClient.query(`RELEASE SAVEPOINT ${savepoint}`);
-              outcomes.push({ status: 'stored', message });
+              eventsProcessedCounter.inc();
+              resolveOffset(message.offset);
             } catch (err) {
               console.error('❌ Error processing single message, routing to DLQ:', err);
-              await pgClient.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-              await pgClient.query(`RELEASE SAVEPOINT ${savepoint}`);
-              outcomes.push({ status: 'dlq', message });
+              
+              // Increment failed metrics counter
+              eventsFailedCounter.inc();
+
+              // Route poison pill to DLQ topic
+              await dlqProducer.send({
+                topic: DLQ_TOPIC,
+                messages: [
+                  {
+                    key: message.key,
+                    value: message.value,
+                  },
+                ],
+              });
+
+              // Commit offset anyway so we don't block subsequent events in the partition
+              resolveOffset(message.offset);
             }
 
             // Tell Kafka broker this consumer is still healthy
@@ -150,33 +114,11 @@ const startConsumer = async () => {
           // Rollback the entire transaction on DB failures (e.g. database network error)
           await pgClient.query('ROLLBACK');
           console.error('❌ Transaction rolled back due to error:', transactionError);
-
-          // Nothing in `outcomes` gets acted on: no offsets resolved and no DLQ
-          // sends, so KafkaJS will redeliver this whole batch from the last
-          // committed offset once retries reconnect.
-          throw transactionError;
+          
+          // Re-throw so KafkaJS handles reconnection retries
+          throw transactionError; 
         } finally {
           pgClient.release();
-        }
-
-        // The DB transaction is durably committed at this point, so it's now
-        // safe to fan out side effects and let Kafka advance past these offsets.
-        for (const outcome of outcomes) {
-          if (outcome.status === 'stored') {
-            eventsProcessedCounter.inc();
-          } else {
-            eventsFailedCounter.inc();
-            await dlqProducer.send({
-              topic: DLQ_TOPIC,
-              messages: [
-                {
-                  key: outcome.message.key,
-                  value: outcome.message.value,
-                },
-              ],
-            });
-          }
-          resolveOffset(outcome.message.offset);
         }
       },
     });

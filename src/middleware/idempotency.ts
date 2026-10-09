@@ -1,8 +1,24 @@
+import { createHash } from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import redis from '../config/redis.js';
 
 const uuidSchema = z.string().uuid('Idempotency-Key must be a valid UUID v4');
+
+// Key-order-independent JSON, so {a,b} and {b,a} fingerprint identically.
+const canonicalize = (v: unknown): unknown =>
+  Array.isArray(v)
+    ? v.map(canonicalize)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(
+          Object.entries(v as Record<string, unknown>)
+            .sort(([a], [b]) => (a < b ? -1 : 1))
+            .map(([k, val]) => [k, canonicalize(val)])
+        )
+      : v;
+
+const fingerprint = (body: unknown): string =>
+  createHash('sha256').update(JSON.stringify(canonicalize(body ?? null))).digest('hex');
 
 export const enforceIdempotency = async (
   req: Request,
@@ -30,17 +46,30 @@ export const enforceIdempotency = async (
   }
 
   const redisKey = `idempotency:key:${idempotencyKey}`;
+  // Stored with the key so the same key can't silently carry a different payload.
+  const fp = fingerprint(req.body);
 
   try {
     // Attempt to acquire an execution lock with 10 seconds TTL
     // NX: Only set if the key does not exist
-    const lockAcquired = await redis.set(redisKey, 'IN_PROGRESS', 'EX', 10, 'NX');
+    const lockAcquired = await redis.set(redisKey, `IN_PROGRESS:${fp}`, 'EX', 10, 'NX');
 
     if (!lockAcquired) {
       // Key exists! Fetch the status
       const currentValue = await redis.get(redisKey);
 
-      if (currentValue === 'IN_PROGRESS') {
+      // Formats: IN_PROGRESS:<fingerprint> | RESOLVED:<fingerprint>:<json>
+      const [state, storedFp] = (currentValue ?? '').split(':', 2);
+
+      if ((state === 'IN_PROGRESS' || state === 'RESOLVED') && storedFp !== fp) {
+        res.status(422).json({
+          status: 'error',
+          message: 'Idempotency-Key was already used with a different request payload',
+        });
+        return;
+      }
+
+      if (state === 'IN_PROGRESS') {
         // Active request in flight: return 409 Conflict
         res.status(409).json({
           status: 'error',
@@ -49,9 +78,9 @@ export const enforceIdempotency = async (
         return;
       }
 
-      if (currentValue && currentValue.startsWith('RESOLVED:')) {
+      if (state === 'RESOLVED' && currentValue) {
         // Request was already processed: serve cached response
-        const cachedResponseStr = currentValue.substring('RESOLVED:'.length);
+        const cachedResponseStr = currentValue.substring('RESOLVED:'.length + fp.length + 1);
         const cachedResponse = JSON.parse(cachedResponseStr);
 
         res.status(cachedResponse.statusCode).json(cachedResponse.body);
@@ -78,7 +107,7 @@ export const enforceIdempotency = async (
         };
         // Store resolved response in Redis with a 24-hour (86400 seconds) expiration
         redis
-          .set(redisKey, `RESOLVED:${JSON.stringify(responseData)}`, 'EX', 86400)
+          .set(redisKey, `RESOLVED:${fp}:${JSON.stringify(responseData)}`, 'EX', 86400)
           .catch((err: any) => {
             console.error('❌ Failed to save response to idempotency cache:', err);
           });

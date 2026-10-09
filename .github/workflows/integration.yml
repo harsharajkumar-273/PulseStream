@@ -1,0 +1,67 @@
+name: Integration (failure semantics)
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'tests/**', 'docker-compose.yml', 'Dockerfile', 'package*.json', '.github/workflows/integration.yml']
+  pull_request:
+    paths: ['src/**', 'tests/**', 'docker-compose.yml', 'Dockerfile', 'package*.json', '.github/workflows/integration.yml']
+
+permissions:
+  contents: read
+
+env:
+  SERVICES: postgres redis redpanda create-topic api-gateway metrics-consumer
+
+jobs:
+  fixed-consumer:
+    name: Suite passes against the fixed consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Start disposable services
+        run: docker compose up --build -d $SERVICES
+      - name: Run suite
+        run: npm run test:integration
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200 api-gateway metrics-consumer
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  pre-fix-consumer:
+    name: Suite fails against the pre-fix transaction bug
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Swap in the pre-fix consumer
+        run: cp tests/fixtures/consumer.pre-fix.ts src/consumer.ts
+      - name: Start disposable services
+        run: docker compose up --build -d $SERVICES
+      - name: Suite must fail, and specifically on the batch-isolation test
+        run: |
+          set +e
+          npm run test:integration 2>&1 | tee suite.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Suite passed against the pre-fix consumer; it no longer detects the bug."
+            exit 1
+          fi
+          if ! grep -q "✖ valid-invalid-valid batch" suite.log; then
+            echo "::error::Suite failed, but not on the valid-invalid-valid test."
+            exit 1
+          fi
+          echo "Suite failed on the valid-invalid-valid test, as expected."
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans
