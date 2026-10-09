@@ -127,6 +127,57 @@ describe("API failure semantics", () => {
     assert.deepEqual(v.mismatched, [], "stored payload must be the first one submitted");
   });
 
+  // The payload fingerprint lives only in Redis, while Postgres keeps the event.
+  // Once the fingerprint is gone the gateway can no longer reject a conflicting
+  // replay, so the consumer must: first payload preserved, conflict dead-lettered
+  // (visible), never silently dropped.
+  it("different-payload replay after Redis state loss: first payload kept, conflict dead-lettered", SLOW, async () => {
+    const key = uuid();
+    const first = newEvent({ value: 1.5 });
+    const second = { ...first, value: 99.9 };
+    const ledger = new Ledger();
+
+    assert.equal((await ledger.submit(key, first)).status, 202);
+    await ledger.waitUntilPersisted();
+
+    redisCli("FLUSHALL"); // idempotency state gone, event still in Postgres
+    const replay = await postEvent(key, second);
+    assert.equal(replay.status, 202, "gateway has no memory of the key, so it cannot reject the replay");
+
+    await waitFor(() => dlqContents().some((m) => m.id === key && m.value === 99.9), {
+      timeout: 60_000, what: "conflicting replay on the DLQ",
+    });
+    await waitForDrain();
+    assert.equal(countRows(key), 1);
+    assert.deepEqual(ledger.verify().mismatched, [], "stored payload must still be the first one");
+  });
+
+  it("different-payload replay after lock expiry: exactly one payload stored, the other dead-lettered", SLOW, async () => {
+    const key = uuid();
+    const a = newEvent({ value: 1.5 });
+    const b = { ...a, value: 99.9 };
+
+    pause(C.redpanda); // request A hangs in the Kafka publish while holding the lock
+    const ra = postEvent(key, a, { timeoutMs: 60_000 });
+    await sleep(2000);
+    redisCli("DEL", `idempotency:key:${key}`); // same state as the 10s lock TTL expiring
+    const rb = postEvent(key, b, { timeoutMs: 60_000 }); // fresh lock, different payload
+    await sleep(1000);
+    unpause(C.redpanda);
+    assert.deepEqual([(await ra).status, (await rb).status], [202, 202]);
+
+    await waitFor(() => countRows(key) === 1, { timeout: 90_000, what: "one stored row" });
+    await waitForDrain();
+    const [row] = fetchRows([key]);
+    const storedIsA = row.value === a.value;
+    assert.ok(storedIsA || row.value === b.value, "stored row must be exactly one of the submitted payloads");
+    const loser = storedIsA ? b : a;
+    await waitFor(() => dlqContents().some((m) => m.id === key && m.value === loser.value), {
+      timeout: 60_000, what: "the losing payload on the DLQ",
+    });
+    assert.equal(countRows(key), 1);
+  });
+
   it("consumer SIGKILLed mid-transaction (before COMMIT): nothing lost, nothing duplicated", SLOW, async () => {
     const deviceId = uuid();
     const ledger = new Ledger();
