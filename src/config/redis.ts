@@ -4,6 +4,10 @@ import { env } from './env.js';
 // Create a redis client instance
 const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: null, // Critical for robust connection retries
+  // With the offline queue and no retry cap, commands issued during an outage
+  // would wait forever and hang the HTTP request. Bound them so the gateway
+  // fails fast (503) before anything is published.
+  commandTimeout: 2000,
   retryStrategy(times: number) {
     const delay = Math.min(times * 100, 3000);
     return delay;
