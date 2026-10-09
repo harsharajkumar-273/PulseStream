@@ -99,6 +99,12 @@ Injected crashes:  3
 
 For comparison, running the same test against the pre-fix code with a single malformed message mixed into one batch — no crash required — sent 2 perfectly valid sibling events straight to the DLQ, because the poison message aborted the shared transaction and every subsequent insert in that batch inherited the same "current transaction is aborted" error.
 
+### API-level failure tests
+
+`benchmarks/crash_test.js` produces straight onto Kafka. [`tests/integration/api.test.mjs`](tests/integration/api.test.mjs) goes through `POST /v1/events` and tracks acknowledged ids, persisted ids, payload correctness and DLQ contents (`npm run test:integration`, against the compose stack). It covers a valid-invalid-valid batch (the invalid event is a NUL byte in `eventType`, which passes Zod but not Postgres), repeated and concurrent idempotency keys, one key with different payloads (now an explicit `422`), consumer SIGKILL mid-transaction, a failure after COMMIT but before offsets advance, a Redis outage, and a request that outlives its idempotency lock.
+
+Against the fixed code all 9 pass (twice in a row). Against the pre-fix consumer the valid-invalid-valid test fails because the valid events are silently rolled back while their offsets advance; CI (`.github/workflows/integration.yml`) runs both and requires that exact result. Writing the suite also found and fixed three more bugs: the same idempotency key silently accepted a different payload, requests hung forever during a Redis outage, and a failed DLQ send left the consumer permanently stopped while `/health` still said UP.
+
 ---
 
 ## Quick start

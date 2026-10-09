@@ -7,7 +7,9 @@ export const errorHandler = (
   res: Response,
   next: NextFunction
 ): void => {
-  const statusCode = err.status || err.statusCode || 500;
+  // ioredis command timeouts mean Redis is unreachable: report unavailability, not a bug.
+  const redisDown = typeof err.message === 'string' && err.message.includes('Command timed out');
+  const statusCode = redisDown ? 503 : err.status || err.statusCode || 500;
   const isProd = env.NODE_ENV === 'production';
 
   // Log the error (we can update this later to structured JSON logging)

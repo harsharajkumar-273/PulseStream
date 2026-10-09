@@ -35,6 +35,17 @@ const dbWriteDuration = new client.Histogram({
 const consumer = kafka.consumer({ groupId: 'pulsestream-metrics-group' });
 const dlqProducer = kafka.producer();
 
+// KafkaJS stops the consumer for good on a non-retriable error (e.g. a failed
+// DLQ send) while this process and its /health endpoint stay up, which is a
+// silent outage. Exit so the orchestrator restarts us; uncommitted offsets are
+// redelivered and ON CONFLICT DO NOTHING makes that safe.
+consumer.on(consumer.events.CRASH, ({ payload }) => {
+  if (!payload.restart) {
+    console.error('❌ Consumer crashed and will not auto-restart; exiting for the orchestrator to restart:', payload.error);
+    process.exit(1);
+  }
+});
+
 const startConsumer = async () => {
   try {
     console.log('🔄 Initializing Kafka Consumer...');
