@@ -85,6 +85,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: pulsestream-consumer
+    restart: unless-stopped
     command: node dist/consumer.js
     ports:
       - '3001:3001'
@@ -112,7 +113,8 @@ services:
         condition: service_healthy
     entrypoint: >
       sh -c "rpk topic create metrics.raw --partitions 3 --brokers redpanda:29092 ||
-             rpk topic add-partitions metrics.raw --num 2 --brokers redpanda:29092 || true"
+             rpk topic add-partitions metrics.raw --num 2 --brokers redpanda:29092 || true;
+             rpk topic create metrics.dlq --brokers redpanda:29092 || true"
     restart: "no"
 
   # 6. Observability: Prometheus

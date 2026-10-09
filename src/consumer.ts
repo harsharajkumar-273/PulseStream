@@ -35,6 +35,17 @@ const dbWriteDuration = new client.Histogram({
 const consumer = kafka.consumer({ groupId: 'pulsestream-metrics-group' });
 const dlqProducer = kafka.producer();
 
+// KafkaJS stops the consumer for good on a non-retriable error (e.g. a failed
+// DLQ send) while this process and its /health endpoint stay up, which is a
+// silent outage. Exit so the orchestrator restarts us; uncommitted offsets are
+// redelivered and ON CONFLICT DO NOTHING makes that safe.
+consumer.on(consumer.events.CRASH, ({ payload }) => {
+  if (!payload.restart) {
+    console.error('❌ Consumer crashed and will not auto-restart; exiting for the orchestrator to restart:', payload.error);
+    process.exit(1);
+  }
+});
+
 const startConsumer = async () => {
   try {
     console.log('🔄 Initializing Kafka Consumer...');
@@ -83,10 +94,11 @@ const startConsumer = async () => {
               const event = JSON.parse(rawValue);
 
               // SQL Batch Insertion with ON CONFLICT DO NOTHING (idempotency check)
-              await pgClient.query(
+              const inserted = await pgClient.query(
                 `INSERT INTO events (id, device_id, event_type, value, timestamp)
                  VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (id) DO NOTHING`,
+                 ON CONFLICT (id) DO NOTHING
+                 RETURNING id`,
                 [
                   event.id,
                   event.deviceId,
@@ -95,6 +107,28 @@ const startConsumer = async () => {
                   event.timestamp,
                 ]
               );
+
+              // An existing row is only a harmless redelivery if it holds the
+              // same payload. The gateway's payload fingerprint lives in Redis
+              // and can be gone (state loss, lock expiry), so a replay of the
+              // same key with different data can reach this point; keep the
+              // first payload and dead-letter the conflict instead of dropping it.
+              if (inserted.rowCount === 0) {
+                const { rows } = await pgClient.query(
+                  'SELECT device_id, event_type, value, timestamp FROM events WHERE id = $1',
+                  [event.id]
+                );
+                const row = rows[0];
+                if (
+                  row &&
+                  (String(row.device_id).toLowerCase() !== String(event.deviceId).toLowerCase() ||
+                    row.event_type !== event.eventType ||
+                    row.value !== event.value ||
+                    Number(row.timestamp) !== event.timestamp)
+                ) {
+                  throw new Error(`Idempotency conflict: event ${event.id} already stored with a different payload`);
+                }
+              }
 
               await pgClient.query(`RELEASE SAVEPOINT ${savepoint}`);
               outcomes.push({ status: 'stored', message });
