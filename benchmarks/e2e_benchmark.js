@@ -14,6 +14,15 @@
  * for the consumer to drain, then look up each event's row in Postgres and
  * diff `created_at` against the send timestamp.
  *
+ * Two rates are reported, because they answer different questions:
+ *   - accepted rate: events persisted / send window. This is how fast the
+ *     gateway accepted work that eventually became durable, NOT a sustained
+ *     durable-write rate — under a burst the consumer is still draining a
+ *     backlog after the send window closes.
+ *   - durable rate: events persisted / (first send -> last durable row).
+ *     This includes the drain and is the closer number to steady-state
+ *     write throughput for this burst.
+ *
  * Requires the stack to already be running: `docker-compose up --build -d`.
  *
  * Usage:
@@ -114,11 +123,15 @@ async function main() {
 
   const drainStart = Date.now();
   let lagZeroStreak = 0;
+  let drained = false;
   while (Date.now() - drainStart < 120_000) {
     const lag = consumerLag();
     if (lag === 0) {
       lagZeroStreak++;
-      if (lagZeroStreak >= 3) break;
+      if (lagZeroStreak >= 3) {
+        drained = true;
+        break;
+      }
     } else {
       lagZeroStreak = 0;
     }
@@ -156,7 +169,12 @@ async function main() {
 
   const persistedCount = rows.length;
   const wallClockSeconds = sendWindowMs / 1000;
-  const persistedPerSec = persistedCount / wallClockSeconds;
+  const acceptedPerSec = persistedCount / wallClockSeconds;
+  // Measured from the rows themselves (not from the lag poll, which adds up
+  // to ~4.5s of polling slack), so it's when the last event actually landed.
+  const lastDurableMs = rows.reduce((m, r) => Math.max(m, r.createdAtMs), workerStart);
+  const durableSeconds = (lastDurableMs - workerStart) / 1000;
+  const durablePerSec = persistedCount / durableSeconds;
 
   console.log("\n=== End-to-end persistence benchmark result ===");
   console.log(`Target: ${url}`);
@@ -164,7 +182,10 @@ async function main() {
   console.log(`Sent (202 ACKed):        ${acked}`);
   console.log(`Persisted in Postgres:   ${persistedCount}`);
   console.log(`Lost (never persisted):  ${lost.length}`);
-  console.log(`Persisted events/sec:    ${persistedPerSec.toFixed(1)} (over the ${wallClockSeconds.toFixed(1)}s send window)`);
+  console.log(`Send window:             ${wallClockSeconds.toFixed(1)}s`);
+  console.log(`First send -> last row:  ${durableSeconds.toFixed(1)}s (drain after window: ${(durableSeconds - wallClockSeconds).toFixed(1)}s)${drained ? "" : "  ⚠️ lag never reached 0 within 120s"}`);
+  console.log(`Accepted rate:           ${acceptedPerSec.toFixed(1)} events/s (persisted / send window — not a sustained durable rate)`);
+  console.log(`Durable rate:            ${durablePerSec.toFixed(1)} events/s (persisted / first send -> last durable row)`);
   console.log(
     `End-to-end latency p50/p95/p99 (ms): ${percentile(latencies, 50)} / ${percentile(latencies, 95)} / ${percentile(
       latencies,

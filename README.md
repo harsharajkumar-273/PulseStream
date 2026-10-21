@@ -11,8 +11,8 @@ A telemetry ingestion pipeline: devices POST events to an Express API, the API p
 | | |
 |---|---|
 | **Measured** | 3,653 req/s average, 11 ms p50 / 36 ms p99 ingestion acknowledgments (50 connections, 30 s, local Docker, 0 errors) |
-| **Also measured** | 2,933 events/s actually persisted to PostgreSQL end-to-end, p50 3.7 s / p99 10.3 s produce-to-durable-row latency under the same load — see [Benchmark](#benchmark) |
-| **Also measured** | 0 events lost / 0 duplicated across repeated `SIGKILL`s of the consumer and database mid-batch — see [Correctness under failure](#correctness-under-failure) |
+| **Also measured** | 30 s, 50-connection burst through the API: all 88,004 acknowledged events reached PostgreSQL (0 lost). That's 2,933 events/s *accepted* over the 30 s send window, not a sustained durable-write rate: the consumer was still draining a backlog after sending stopped (p50 3.7 s / p99 10.3 s from send to durable row). See [Benchmark](#benchmark) |
+| **Also measured** | One crash-injection run: 3,000 events total, produced directly to Kafka, with 3 `SIGKILL`s during that run (consumer, Postgres, consumer). Every broker-acknowledged event had a row in PostgreSQL after the drain. The broker was never killed. See [Correctness under failure](#correctness-under-failure) |
 | **Stack** | Express · KafkaJS · Redpanda · Redis · PostgreSQL · Prometheus/Grafana · Spark + Delta Lake (optional) |
 
 ---
@@ -71,6 +71,8 @@ Persisted events/sec:    2,932.7 (over the 30.0s send window)
 End-to-end latency p50/p95/p99 (ms): 3,725 / 9,321 / 10,345
 ```
 
+**How to read 2,933 events/s.** It is 88,004 persisted events divided by the **30.0 s send window** only. The consumer kept writing after sending stopped, and that run didn't time the drain. So 2,933/s is the rate the gateway *accepted* work that later became durable. It is **not** a sustained durable-write rate, and the real one for this burst is lower by an amount we don't know. The script now also prints `First send -> last row` and a `Durable rate` (persisted ÷ first send → last durable row, drain included). Quote that number for steady-state write throughput once it's re-run. Also, the `load_test.js` and `e2e_benchmark.js` runs above are separate runs, not one measurement.
+
 The gap between the two is the honest finding: the API ACKs in ~11ms, but under a sustained 50-connection burst the consumer can't keep up in real time, so a durable write can lag the HTTP `202` by several seconds while a backlog builds and drains. That's the exact backlog pattern [KEDA autoscaling](#keda-autoscaling) below is meant to shrink.
 
 ---
@@ -81,7 +83,7 @@ The consumer used to resolve each message's Kafka offset — and send DLQ messag
 
 **Fix:** a `SAVEPOINT` per message isolates one bad record from its batch neighbors, and offsets/DLQ sends are only acted on after the batch's transaction durably commits (see [`src/consumer.ts`](src/consumer.ts)).
 
-[`benchmarks/crash_test.js`](benchmarks/crash_test.js) produces a batch of uniquely-identified events straight onto `metrics.raw` while repeatedly `SIGKILL`-ing the consumer and/or Postgres containers mid-stream (a real crash, not a graceful shutdown), then diffs every sent id against what's actually stored once the consumer drains:
+[`benchmarks/crash_test.js`](benchmarks/crash_test.js) produces a batch of uniquely-identified events straight onto `metrics.raw` while repeatedly `SIGKILL`-ing the consumer and/or Postgres containers mid-stream (a real crash, not a graceful shutdown), then diffs every broker-acknowledged id against what's actually stored once the consumer drains:
 
 ```bash
 docker-compose up --build -d
@@ -96,6 +98,13 @@ Duplicated:        0
 Injected crashes:  3
 ✅ PASS: 0 lost / 0 duplicated across 3 injected crashes.
 ```
+
+What this run does and doesn't establish:
+
+- **Scope.** It was **one run of 3,000 events in total**, not 3,000 per crash. The 3 kills happened during that one run, in a fixed order: consumer, Postgres, consumer.
+- **What was checked.** Every event id whose Kafka produce call succeeded ended up with a row in `events` once consumer-group lag reached 0. In other words, a `SIGKILL` of the consumer or the database mid-batch didn't cause the consumer to commit offsets past unwritten rows. (The run above used an older version of the script that counted ids before the produce call returned. All 3,000 attempted ids were stored, so the result doesn't depend on that difference. The script now counts only acknowledged ids and prints the attempted and acknowledged totals separately.)
+- **Duplicates.** `Duplicated: 0` comes from the schema, not from the experiment: `events.id` is a primary key and inserts use `ON CONFLICT DO NOTHING`. Redelivery after a crash is expected and is absorbed as a no-op.
+- **Not covered.** The broker was never killed. The compose stack runs a single Redpanda node in `dev-container` mode, with no replication and relaxed fsync, so this says nothing about broker-crash durability or end-to-end exactly-once delivery. The HTTP gateway was bypassed. API-path cases, including a consumer `SIGKILL` mid-transaction, are covered by the integration suite below.
 
 For comparison, running the same test against the pre-fix code with a single malformed message mixed into one batch — no crash required — sent 2 perfectly valid sibling events straight to the DLQ, because the poison message aborted the shared transaction and every subsequent insert in that batch inherited the same "current transaction is aborted" error.
 

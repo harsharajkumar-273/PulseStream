@@ -8,12 +8,17 @@
  * and/or Postgres containers mid-stream via `docker kill` + `docker start`
  * (a SIGKILL, not a graceful shutdown). Once the consumer has drained,
  * it compares the set of event ids actually stored in Postgres against
- * the set of ids sent, and reports:
+ * the set of ids the broker acknowledged, and reports:
  *
- *   - lost:      sent but never stored (data loss)
+ *   - lost:      acknowledged by the broker but never stored (data loss)
  *   - duplicate: stored more than once (should be impossible: `id` is the
  *                table's primary key and inserts use ON CONFLICT DO NOTHING,
  *                so this count is a correctness assertion, not a measurement)
+ *
+ * What this does NOT cover: the broker itself is never killed (and the
+ * compose file runs a single Redpanda node in dev-container mode), and the
+ * HTTP gateway is bypassed — API-path crashes are covered by
+ * tests/integration/api.test.mjs instead.
  *
  * Requires the stack to already be running: `docker-compose up --build -d`.
  *
@@ -115,15 +120,19 @@ async function produceEvents() {
   const producer = kafka.producer();
   await producer.connect();
 
-  const sentIds = new Set();
+  // Only ids the broker acknowledged count: an id whose produce call failed
+  // was never accepted, so its absence from Postgres isn't data loss.
+  const ackedIds = new Set();
+  let attempted = 0;
   const BATCH_SIZE = 200;
 
   for (let sent = 0; sent < TOTAL; sent += BATCH_SIZE) {
     const n = Math.min(BATCH_SIZE, TOTAL - sent);
     const messages = [];
+    const ids = [];
     for (let i = 0; i < n; i++) {
       const id = crypto.randomUUID();
-      sentIds.add(id);
+      ids.push(id);
       messages.push({
         key: `device-${(sent + i) % 50}`,
         value: JSON.stringify({
@@ -135,16 +144,20 @@ async function produceEvents() {
         }),
       });
     }
-    await producer.send({ topic: TOPIC, messages }).catch((err) => {
+    attempted += n;
+    try {
+      await producer.send({ topic: TOPIC, messages });
+      for (const id of ids) ackedIds.add(id);
+    } catch (err) {
       // Broker may be mid-restart; the test cares about durability of what's
       // acknowledged, so a produce error here just means fewer messages sent.
       console.warn(`⚠️  Produce error (continuing): ${err.message}`);
-    });
+    }
     await sleep(50);
   }
 
   await producer.disconnect();
-  return sentIds;
+  return { ackedIds, attempted };
 }
 
 async function waitForDrain() {
@@ -176,7 +189,7 @@ async function main() {
 
   const before = Number(psql("SELECT count(*) FROM events;"));
 
-  const [sentIds] = await Promise.all([produceEvents(), injectFailures()]);
+  const [{ ackedIds: sentIds, attempted }, killLog] = await Promise.all([produceEvents(), injectFailures()]);
 
   console.log("\n⏳ Waiting for consumer to drain and stabilize...");
   await waitForDrain();
@@ -215,11 +228,12 @@ async function main() {
   const storedCount = sentIds.size - lost.length;
 
   console.log("\n=== Crash-injection test result ===");
-  console.log(`Sent:              ${sentIds.size}`);
+  console.log(`Produce attempted: ${attempted} (events in this run, total)`);
+  console.log(`Broker-acked:      ${sentIds.size}`);
   console.log(`Stored (matched):  ${storedCount}`);
-  console.log(`Lost:              ${lost.length}`);
-  console.log(`Duplicated:        ${duplicateCheck}`);
-  console.log(`Injected crashes:  ${NUM_KILLS}`);
+  console.log(`Lost (acked, no row): ${lost.length}`);
+  console.log(`Duplicated:        ${duplicateCheck} (PK-enforced; sanity check, not evidence)`);
+  console.log(`Injected crashes:  ${NUM_KILLS} (${killLog.map((k) => k.target.replace("pulsestream-", "")).join(", ")})`);
   console.log(`events table rows: ${before} -> ${after}`);
   console.log("====================================\n");
 
@@ -232,7 +246,7 @@ async function main() {
     console.log(`❌ FAIL: ${duplicateCheck} events duplicated (should be impossible with PK + ON CONFLICT).`);
     process.exit(1);
   }
-  console.log(`✅ PASS: 0 lost / 0 duplicated across ${NUM_KILLS} injected crashes.`);
+  console.log(`✅ PASS: all ${sentIds.size} broker-acked events stored across ${NUM_KILLS} injected crashes in one run.`);
 }
 
 main().catch((err) => {
