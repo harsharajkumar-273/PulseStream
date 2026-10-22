@@ -11,7 +11,7 @@ A telemetry ingestion pipeline: devices POST events to an Express API, the API p
 | | |
 |---|---|
 | **Measured** | 3,653 req/s average, 11 ms p50 / 36 ms p99 ingestion acknowledgments (50 connections, 30 s, local Docker, 0 errors) |
-| **Also measured** | 30 s, 50-connection burst through the API: all 88,004 acknowledged events reached PostgreSQL (0 lost). That's 2,933 events/s *accepted* over the 30 s send window, not a sustained durable-write rate: the consumer was still draining a backlog after sending stopped (p50 3.7 s / p99 10.3 s from send to durable row). See [Benchmark](#benchmark) |
+| **Also measured** | 30 s, 50-connection run through the API on a MacBook Air (Docker Desktop): 12,945 acknowledged events, all 12,945 in PostgreSQL (0 lost), 430 events/s durable, p50 180 ms / p99 854 ms from send to durable row, consumer fully drained 0.1 s after sending stopped. An earlier run on different conditions recorded 2,933 events/s with multi-second lag; it has not been reproduced — see [Benchmark](#benchmark) |
 | **Also measured** | One crash-injection run: 3,000 events total, produced directly to Kafka, with 3 `SIGKILL`s during that run (consumer, Postgres, consumer). Every broker-acknowledged event had a row in PostgreSQL after the drain. The broker was never killed. See [Correctness under failure](#correctness-under-failure) |
 | **Stack** | Express · KafkaJS · Redpanda · Redis · PostgreSQL · Prometheus/Grafana · Spark + Delta Lake (optional) |
 
@@ -63,17 +63,20 @@ Latest recorded runs (50 connections, 30 s):
 └─────────┴──────┴───────┴───────┴───────┴──────────┴──────────┴─────────┘
 Req/Sec avg 3,653.27 · 110k requests in 30.04 s · 2xx: 109,582 · errors: 0
 
-# e2e_benchmark.js — events actually persisted in Postgres
-Sent (202 ACKed):        88,004
-Persisted in Postgres:   88,004
+# e2e_benchmark.js — events actually persisted in Postgres (MacBook Air, Docker Desktop)
+Sent (202 ACKed):        12,945
+Persisted in Postgres:   12,945
 Lost (never persisted):  0
-Persisted events/sec:    2,932.7 (over the 30.0s send window)
-End-to-end latency p50/p95/p99 (ms): 3,725 / 9,321 / 10,345
+Send window:             30.1s
+First send -> last row:  30.1s (drain after window: 0.1s)
+Accepted rate:           430.7 events/s
+Durable rate:            430.0 events/s
+End-to-end latency p50/p95/p99 (ms): 180 / 592 / 854
 ```
 
-**How to read 2,933 events/s.** It is 88,004 persisted events divided by the **30.0 s send window** only. The consumer kept writing after sending stopped, and that run didn't time the drain. So 2,933/s is the rate the gateway *accepted* work that later became durable. It is **not** a sustained durable-write rate, and the real one for this burst is lower by an amount we don't know. The script now also prints `First send -> last row` and a `Durable rate` (persisted ÷ first send → last durable row, drain included). Quote that number for steady-state write throughput once it's re-run. Also, the `load_test.js` and `e2e_benchmark.js` runs above are separate runs, not one measurement.
+**How to read these numbers.** The consumer kept pace with the load in this run (drain 0.1 s after the send window), so accepted rate and durable rate are the same ~430 events/s. Here the limiter is the client-to-API path (50 workers at ~115 ms per request), not the consumer or Postgres, so 430/s is a floor for this setup, not the pipeline's ceiling.
 
-The gap between the two is the honest finding: the API ACKs in ~11ms, but under a sustained 50-connection burst the consumer can't keep up in real time, so a durable write can lag the HTTP `202` by several seconds while a backlog builds and drains. That's the exact backlog pattern [KEDA autoscaling](#keda-autoscaling) below is meant to shrink.
+An earlier recorded run reported 88,004 events at 2,933 events/s with p50 3.7 s / p99 10.3 s latency, which implies a backlog. That run divided by the send window only and didn't time the drain, and a later re-run on a laptop didn't reproduce it (hardware and Docker settings differed, and we don't have the earlier run's environment). Don't compare the two runs or quote 2,933/s as sustained throughput. The `load_test.js` figures above are also from a separate, earlier run (11 ms p50 ACK); 50 workers finishing 430 requests/s implies roughly 115 ms per request in this run, so treat that table as unreproduced on this machine until it's re-run.
 
 ---
 
