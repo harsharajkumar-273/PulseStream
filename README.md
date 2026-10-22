@@ -10,7 +10,7 @@ A telemetry ingestion pipeline: devices POST events to an Express API, the API p
 
 | | |
 |---|---|
-| **Measured** | 3,653 req/s average, 11 ms p50 / 36 ms p99 ingestion acknowledgments (50 connections, 30 s, local Docker, 0 errors) |
+| **Measured** | 419 req/s average, 93 ms p50 / 596 ms p99 ingestion acknowledgments (50 connections, 30 s, MacBook Air + Docker Desktop, 0 errors). An earlier run recorded 3,653 req/s / 11 ms p50 on other conditions and has not been reproduced |
 | **Also measured** | 30 s, 50-connection run through the API on a MacBook Air (Docker Desktop): 12,945 acknowledged events, all 12,945 in PostgreSQL (0 lost), 430 events/s durable, p50 180 ms / p99 854 ms from send to durable row, consumer fully drained 0.1 s after sending stopped. An earlier run on different conditions recorded 2,933 events/s with multi-second lag; it has not been reproduced — see [Benchmark](#benchmark) |
 | **Also measured** | One crash-injection run: 3,000 events total, produced directly to Kafka, with 3 `SIGKILL`s during that run (consumer, Postgres, consumer). Every broker-acknowledged event had a row in PostgreSQL after the drain. The broker was never killed. See [Correctness under failure](#correctness-under-failure) |
 | **Stack** | Express · KafkaJS · Redpanda · Redis · PostgreSQL · Prometheus/Grafana · Spark + Delta Lake (optional) |
@@ -52,16 +52,12 @@ node benchmarks/load_test.js       # HTTP ACK latency + req/s
 node benchmarks/e2e_benchmark.js   # events actually persisted/s + true end-to-end latency
 ```
 
-Latest recorded runs (50 connections, 30 s):
+Latest recorded runs (50 connections, 30 s, run back to back on the same machine):
 
 ```
-# load_test.js — HTTP ACK latency
-┌─────────┬──────┬───────┬───────┬───────┬──────────┬──────────┬─────────┐
-│ Stat    │ 2.5% │ 50%   │ 97.5% │ 99%   │ Avg      │ Stdev    │ Max     │
-├─────────┼──────┼───────┼───────┼───────┼──────────┼──────────┼─────────┤
-│ Latency │ 8 ms │ 11 ms │ 27 ms │ 36 ms │ 13.17 ms │ 23.53 ms │ 1073 ms │
-└─────────┴──────┴───────┴───────┴───────┴──────────┴──────────┴─────────┘
-Req/Sec avg 3,653.27 · 110k requests in 30.04 s · 2xx: 109,582 · errors: 0
+# load_test.js — HTTP ACK latency (MacBook Air, Docker Desktop)
+Latency  p50 93 ms · p97.5 400 ms · p99 596 ms · avg 118 ms · max 957 ms
+Req/Sec  avg 419.27 · 13k requests in 30.43 s · 2xx: 12,578 · non-2xx/errors: 0
 
 # e2e_benchmark.js — events actually persisted in Postgres (MacBook Air, Docker Desktop)
 Sent (202 ACKed):        12,945
@@ -74,9 +70,9 @@ Durable rate:            430.0 events/s
 End-to-end latency p50/p95/p99 (ms): 180 / 592 / 854
 ```
 
-**How to read these numbers.** The consumer kept pace with the load in this run (drain 0.1 s after the send window), so accepted rate and durable rate are the same ~430 events/s. Here the limiter is the client-to-API path (50 workers at ~115 ms per request), not the consumer or Postgres, so 430/s is a floor for this setup, not the pipeline's ceiling.
+**How to read these numbers.** Both scripts show the same thing from two sides: the API takes about 93 ms (p50) to answer `202` on this setup, so 50 connections can only push ~420 requests/s. The consumer kept pace with that (drain 0.1 s after sending stopped), so accepted rate and durable rate are both ~430 events/s and send-to-durable latency is p50 180 ms / p99 854 ms. The limit here is the API/Docker path on a laptop, not the consumer or Postgres, so ~430/s is a floor for this setup, not the pipeline's ceiling. The consumer's own ceiling was not measured.
 
-An earlier recorded run reported 88,004 events at 2,933 events/s with p50 3.7 s / p99 10.3 s latency, which implies a backlog. That run divided by the send window only and didn't time the drain, and a later re-run on a laptop didn't reproduce it (hardware and Docker settings differed, and we don't have the earlier run's environment). Don't compare the two runs or quote 2,933/s as sustained throughput. The `load_test.js` figures above are also from a separate, earlier run (11 ms p50 ACK); 50 workers finishing 430 requests/s implies roughly 115 ms per request in this run, so treat that table as unreproduced on this machine until it's re-run.
+Earlier recorded runs reported 3,653 req/s with 11 ms p50 ACKs, and 2,933 events/s with p50 3.7 s / p99 10.3 s latency (computed over the send window only, drain not timed). Neither reproduced here; the environment they came from isn't recorded, so don't quote them or compare them to the numbers above.
 
 ---
 
@@ -94,18 +90,20 @@ node benchmarks/crash_test.js --count 3000 --kills 3
 ```
 
 ```
-Sent:              3000
+Produce attempted: 3000 (events in this run, total)
+Broker-acked:      3000
 Stored (matched):  3000
-Lost:              0
-Duplicated:        0
-Injected crashes:  3
-✅ PASS: 0 lost / 0 duplicated across 3 injected crashes.
+Lost (acked, no row): 0
+Duplicated:        0 (PK-enforced; sanity check, not evidence)
+Injected crashes:  3 (consumer, postgres, consumer)
+events table rows: 15945 -> 18945
+✅ PASS: all 3000 broker-acked events stored across 3 injected crashes in one run.
 ```
 
 What this run does and doesn't establish:
 
 - **Scope.** It was **one run of 3,000 events in total**, not 3,000 per crash. The 3 kills happened during that one run, in a fixed order: consumer, Postgres, consumer.
-- **What was checked.** Every event id whose Kafka produce call succeeded ended up with a row in `events` once consumer-group lag reached 0. In other words, a `SIGKILL` of the consumer or the database mid-batch didn't cause the consumer to commit offsets past unwritten rows. (The run above used an older version of the script that counted ids before the produce call returned. All 3,000 attempted ids were stored, so the result doesn't depend on that difference. The script now counts only acknowledged ids and prints the attempted and acknowledged totals separately.)
+- **What was checked.** Every event id whose Kafka produce call succeeded ended up with a row in `events` once consumer-group lag reached 0. In other words, a `SIGKILL` of the consumer or the database mid-batch didn't cause the consumer to commit offsets past unwritten rows. All 3,000 attempted events were broker-acknowledged, and the table grew by exactly 3,000 rows (15,945 → 18,945). The output doesn't show whether each kill interrupted an in-flight transaction.
 - **Duplicates.** `Duplicated: 0` comes from the schema, not from the experiment: `events.id` is a primary key and inserts use `ON CONFLICT DO NOTHING`. Redelivery after a crash is expected and is absorbed as a no-op.
 - **Not covered.** The broker was never killed. The compose stack runs a single Redpanda node in `dev-container` mode, with no replication and relaxed fsync, so this says nothing about broker-crash durability or end-to-end exactly-once delivery. The HTTP gateway was bypassed. API-path cases, including a consumer `SIGKILL` mid-transaction, are covered by the integration suite below.
 
